@@ -1,0 +1,31 @@
+# data and results never belong in the repository
+outputs/
+inputs/
+envs/
+miniforge3/
+logs/
+zenodo_upload/
+github_stage/
+review_*/
+*.tar.gz
+*.zip
+# large or generated artefacts
+*.faa
+*.fasta
+*.nwk
+*.aln
+*.dmnd
+*.hmm
+*.db
+*.sqlite
+*.png
+*.pdf
+*.docx
+# backups the patch scripts leave behind
+*.bak
+*.bak_ids
+*.pre_v3
+*.orig.png
+__pycache__/
+*.pyc
+.conda_cache/

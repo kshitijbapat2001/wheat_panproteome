@@ -1,0 +1,39 @@
+# =====================================================================================
+# environment.yml  --  reproducible conda/mamba environment for the pan-proteome pipeline
+# Built automatically by submit_panproteome.sh (idempotent). Channels ordered per bioconda
+# recommendation (conda-forge, then bioconda). Pins keep numpy/pandas in a tested range.
+# =====================================================================================
+name: wheat_panproteome
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # --- language / core scientific stack ---
+  - python=3.10
+  - pip
+  - numpy<2
+  - pandas<3
+  - scipy
+  - matplotlib-base
+  - seaborn
+  - pyyaml
+  - biopython>=1.81
+  # --- bioinformatics tools (bioconda) ---
+  - diamond>=2.1        # fast homology search
+  - mafft>=7.5          # multiple sequence alignment
+  - fasttree>=2.1       # phylogenetic trees
+  # --- domain confirmation (used to validate family identity from Pfam/InterPro) ---
+  - hmmer>=3.3
+  # --- report generation (pip; pure-python) ---
+  - tabulate            # markdown table formatting
+  - pillow              # figure DPI checks (verify_outputs.py, check_figure_dpi.py)
+  - openpyxl            # optional DESeq2 .xlsx in transcript_crossref --expression
+  - pip:
+      - python-docx>=1.1
+# -------------------------------------------------------------------------------------
+# Optional add-ons (uncomment if you extend the pipeline to nucleotide/VCF work):
+#   - htslib            # tabix/bgzip
+#   - bcftools
+#   - samtools
+#   - blast             # alternative to diamond
+# -------------------------------------------------------------------------------------
