@@ -2,7 +2,7 @@
 
 Code and data for **"Pan-proteome catalogue of Rubisco activase and chaperonins in bread wheat"** (K. Bapat, A. P. Scafaro, A. Pratap and N. L. Taylor; submitted to *Nature Plants* as a Resource).
 
-Dataset DOI (Zenodo): https://doi.org/10.5281/zenodo.21886022 (concept DOI for all versions: https://doi.org/10.5281/zenodo.21886021)
+Dataset DOI (Zenodo): 10.5281/zenodo.23182310 
 Code: https://github.com/kshitijbapat2001/wheat_panproteome
 
 The release contains (i) the complete analysis pipeline and (ii) every derived dataset, figure, table, Supplementary Data file and Source Data file of the manuscript.
@@ -54,14 +54,8 @@ python make_nature_figures.py --inputs <build> --outdir figures --source-data so
 python alignment_views.py --inputs <build> --outdir supplementary   # Supplementary Data 9 and 12
 ```
 
-Input proteomes: Ensembl Plants release 63 (https://ftp.ebi.ac.uk/ensemblgenomes/pub/plants) for Chinese Spring, ArinaLrFor, Jagger, Julius, Lancer, Landmark, Mace, SY Mattis, Norin61 and CDC Stanley. Independent annotation: White et al. (2025), Zenodo https://doi.org/10.5281/zenodo.16964999.
+Input proteomes: Ensembl Plants release 63 (https://ftp.ebi.ac.uk/ensemblgenomes/pub/plants) for Chinese Spring, ArinaLrFor, Jagger, Julius, Lancer, Landmark, Mace, SY Mattis, Norin61 and CDC Stanley. Independent annotation: White et al. (2025), Zenodo 10.5281/zenodo.23182310.
 
-## Provenance and known issues
-
-* Focal-family tables (Supplementary Data 1–15, 18) come from the clean re-run of 16 September 2026; they are identical to the 11 August 2026 build except for rounding of `net_charge_frac` in four rows, one InterPro string and renamed columns of the Cpn60 class table.
-* The genome-wide catalogue, Supplementary Data 16, Fig. 4 and Extended Data Fig. 3 use the 11 August 2026 build (131,282 clusters: 71,974 core, 12,698 soft-core, 28,437 shell, 18,173 cloud), which matches `WholeProteome_catalog.annotated.faa` and the manuscript. The 16 September re-run gave 131,298 clusters (71,974 core, 12,688 soft-core, 28,472 shell, 18,164 cloud); genome-wide cluster membership is the only output that differed between runs.
-* The RCA tree was built with three external sequences: P10896 (*Arabidopsis thaliana* Rubisco activase), Q40071 (barley Rubisco activase; now merged into UniProt Q40073) and Q9SB58. Q9SB58 is *A. thaliana* protein S-acyltransferase 8 (PAT08), not an activase or CbbX; the pipeline placed the root on its branch. Fig. 2a omits Q9SB58, which roots the tree on P10896 without changing any relationship among the wheat proteoforms. To rebuild the tree without it, replace `Q9SB58` in `code/config.yaml` (`outgroups: RCA`), for example with a CbbX sequence such as UniProt P95648 (*Cereibacter sphaeroides*), and re-run the tree step.
-* `transcripts/prevalence_agreement.csv` and `transcripts/prevalence_discordance.csv` (orthogroup-class comparison with White et al.) are written by `transcript_crossref.py` in the full build and are not included here.
 
 ## Licences
 
@@ -69,6 +63,6 @@ Code (`code/`): MIT licence (`LICENSE`). Data, figures and tables (`data/`): Cre
 
 ## Citation
 
-Bapat, K., Scafaro, A. P., Pratap, A. & Taylor, N. L. Pan-proteome catalogue of Rubisco activase and chaperonins in bread wheat. *Nature Plants* (submitted). Data and code: Zenodo https://doi.org/10.5281/zenodo.21886022.
+Bapat, K., Scafaro, A. P., Pratap, A. & Taylor, N. L. Pan-proteome catalogue of Rubisco activase and chaperonins in bread wheat. *Nature Plants* (submitted). Data and code: Zenodo 10.5281/zenodo.23182310.
 
 Contact: Agyeya Pratap (agyeya.pratap@uwa.edu.au) and Nicolas L. Taylor (nicolas.taylor@uwa.edu.au).
