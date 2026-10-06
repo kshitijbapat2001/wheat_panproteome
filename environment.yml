@@ -1,0 +1,23 @@
+name: wheat_panproteome
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - pip
+  - numpy<2
+  - pandas<3
+  - scipy
+  - matplotlib-base
+  - seaborn
+  - pyyaml
+  - biopython>=1.81
+  - diamond>=2.1        # fast homology search
+  - mafft>=7.5          # multiple sequence alignment
+  - fasttree>=2.1       # phylogenetic trees
+  - hmmer>=3.3
+  - tabulate            # markdown table formatting
+  - pillow              # figure DPI checks (verify_outputs.py, check_figure_dpi.py)
+  - openpyxl            # optional DESeq2 .xlsx in transcript_crossref --expression
+  - pip:
+      - python-docx>=1.1

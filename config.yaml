@@ -1,0 +1,143 @@
+
+project:
+  name: wheat_rca_cpn60_panproteome
+  inputs_dir: inputs
+  outputs_dir: outputs
+
+network:
+  http_proxy: ""
+  https_proxy: ""
+  retries: 4
+  retry_delay_seconds: 5
+
+ensembl:
+  release: "current"
+  division_ftp: "https://ftp.ebi.ac.uk/ensemblgenomes/pub/plants"
+  division_ftp_fallbacks:
+    - "http://ftp.ebi.ac.uk/ensemblgenomes/pub/plants"
+    - "http://ftp.ensemblgenomes.org/pub/plants"
+    - "https://ftp.ensemblgenomes.org/pub/plants"
+
+references:
+  uniprot_rest: "https://rest.uniprot.org/uniprotkb/stream"
+  max_per_family: 200
+  RCA:
+    uniprot_query: '(taxonomy_id:4565) AND (protein_name:"rubisco activase" OR protein_name:"ribulose bisphosphate carboxylase/oxygenase activase" OR gene:rca)'
+    fasta: ""
+  CPN60:
+    uniprot_query: '(taxonomy_id:4565) AND (protein_name:"chaperonin 60" OR protein_name:"60 kDa chaperonin" OR protein_name:"chaperonin-60" OR protein_name:"RuBisCO subunit binding-protein" OR protein_name:"RuBisCO large subunit-binding protein" OR protein_name:"Chaperonin CPN60" OR gene:cpn60 OR gene:cpn60a OR gene:cpn60b OR gene:hsp60)'
+    fasta: ""
+    min_references: 6
+
+whole_proteome:
+  enabled: true
+
+  resume: true
+  work_dir: ""
+
+  collapse_isoforms: true
+
+  min_identity: 40          # % identity
+  min_coverage: 60          # % query coverage
+  evalue: 1.0e-5
+
+  cluster_novel: true
+  cluster_approx_id: 90     # approximate identity for the cluster workflow
+  cluster_member_cover: 80  # % of the member covered by the centroid
+
+  sensitivity: ""
+  block_size_gb: 2.0
+  index_chunks: 4
+  memory_limit_gb: 48
+  fallback_max_target_seqs: 25
+  write_catalog: true
+
+cultivars:
+  chinese_spring:            # reference / novelty baseline (keep this one)
+    ensembl_strain: triticum_aestivum
+    group: unknown
+  arinalrfor:
+    ensembl_strain: triticum_aestivum_arinalrfor
+    group: unknown
+  jagger:
+    ensembl_strain: triticum_aestivum_jagger
+    group: unknown
+  julius:
+    ensembl_strain: triticum_aestivum_julius
+    group: unknown
+  lancer:
+    ensembl_strain: triticum_aestivum_lancer
+    group: unknown
+  landmark:
+    ensembl_strain: triticum_aestivum_landmark
+    group: unknown
+  mace:
+    ensembl_strain: triticum_aestivum_mace
+    group: unknown
+  norin61:
+    ensembl_strain: triticum_aestivum_norin61
+    group: unknown
+  stanley:
+    ensembl_strain: triticum_aestivum_stanley
+    group: unknown
+  mattis:                    # SY Mattis
+    ensembl_strain: triticum_aestivum_mattis
+    group: unknown
+
+homology:
+  min_identity: 40.0          # percent identity of a proteome protein to a reference
+  min_query_coverage: 60.0    # percent of the reference covered by the alignment
+  max_evalue: 1.0e-20
+  diamond_sensitivity: "--more-sensitive"
+  max_target_seqs: 500
+  threads: 8                  # overridden by --threads / SLURM cpus in the submit script
+
+alignment:
+  mafft_args: "--auto --maxiterate 1000"
+  collapse_support_below: 0.8
+  root: outgroup
+  outgroup:
+    RCA: []
+    CPN60: []
+  add_outgroup_sequences: true
+
+external:
+  enabled: true
+  annotate_proteotypes: true
+  fetch_outgroups: true
+  cache_dir: ""             # default <project.inputs_dir>/external_cache
+  max_accessions: 400
+  ncbi_email: ""            # NCBI asks for an identifying email
+  ncbi_api_key: ""
+  outgroups:
+    RCA: ["Q40071", "P10896", "Q9SB58"]
+    CPN60: ["P0A6F5"]
+
+final_outputs:
+  enabled: true
+  dirname: final
+  build_manuscript: true
+
+thermostability:
+  RCA_residues: []
+  CPN60_residues: []
+
+report:
+  title: "A pan-proteome catalogue of bread wheat: Rubisco activase and chaperonin-60 as resources for dissecting the genetic basis of photosynthetic thermotolerance"
+  make_docx: true
+  draw_circos: false
+  candidate_clade: []
+
+rca_isoforms:
+  anchors:
+    TaRca1: {A: TraesCS4A02G177600, B: TraesCS4B02G140200, D: TraesCS4D02G134900}
+    TaRca2: {A: TraesCS4A02G177500, B: TraesCS4B02G140300, D: TraesCS4D02G135000}
+  cte_min_residues: 10            # CTE residues needed to call a TaRca2 proteotype RCA2alpha
+  full_length_min_coverage: 0.97  # coverage of the canonical form needed for "full-length"
+  heat_responsive_elements:
+    TaRca1-A: reported
+    TaRca1-B: reported
+    TaRca1-D: reported
+    TaRca2-A: reported
+    TaRca2-B: not detected
+    TaRca2-D: not detected
