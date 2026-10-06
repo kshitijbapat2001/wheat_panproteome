@@ -1,20 +1,4 @@
 #!/bin/bash
-# =====================================================================================
-# setup_env.sh  --  ONE-TIME setup on a Setonix LOGIN node (needs internet)
-#
-#   cd /scratch/pawsey1276/kbapat/Pan_prot_final
-#   bash setup_env.sh
-#   sbatch submit_panproteome.sh
-#
-# Does four things, each idempotent, so it is safe to re-run:
-#   1. installs Miniforge into the project directory if conda is not already available
-#      (Setonix has no conda module, and HOME is too small for conda packages);
-#   2. creates the pipeline conda environment from environment.yml;
-#   3. pre-downloads every cultivar proteome and every UniProt reference into inputs/;
-#   4. warms the external-database cache (UniProt/InterPro outgroups and annotation).
-#
-# After this, compute nodes never need the internet.
-# =====================================================================================
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,19 +14,16 @@ echo "=================================================================="
 for f in hpc_pipeline.py config.yaml environment.yml tree_tools.py \
          panproteome_audit.py external_data.py build_tables.py \
          make_all_figures.py domain_profiling.py transcript_crossref.py \
-         prefetch_caches.py verify_outputs.py; do
+         prefetch_caches.py verify_outputs.py format_supp_tables.py; do
   [[ -f "$f" ]] || { echo "CRITICAL: $f missing from $PROJECT_DIR"; exit 1; }
 done
-# This build deliberately ships no manuscript generator; tables and numbers only.
 
-# --- caches off HOME (Setonix HOME quota is small) ---------------------------------
 CONDA_CACHE_ROOT="${CONDA_CACHE_ROOT:-$PROJECT_DIR/.conda_cache}"
 export CONDA_PKGS_DIRS="$CONDA_CACHE_ROOT/pkgs"
 export PIP_CACHE_DIR="$CONDA_CACHE_ROOT/pip"
 export XDG_CACHE_HOME="$CONDA_CACHE_ROOT/xdg"
 mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$XDG_CACHE_HOME"
 
-# --- 1. conda ----------------------------------------------------------------------
 CONDA_ROOT="${CONDA_ROOT:-$PROJECT_DIR/miniforge3}"
 if [[ ! -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]]; then
   if command -v conda >/dev/null 2>&1; then
@@ -62,13 +43,11 @@ if [[ ! -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]]; then
     echo "[env] Miniforge installed."
   fi
 fi
-# shellcheck disable=SC1091
 source "$CONDA_ROOT/etc/profile.d/conda.sh"
 SOLVER="conda"
 command -v mamba >/dev/null 2>&1 && SOLVER="mamba"
 echo "[env] solver: $SOLVER   base: $CONDA_ROOT"
 
-# --- 2. environment ----------------------------------------------------------------
 ENV_PREFIX="${CONDA_ENV_PREFIX:-$PROJECT_DIR/envs/wheat_panproteome}"
 if [[ -x "$ENV_PREFIX/bin/python" ]]; then
   echo "[env] reusing existing environment: $ENV_PREFIX"
@@ -84,7 +63,6 @@ done
 
 python hpc_pipeline.py --check-env --config config.yaml || true
 
-# --- 3. proteomes + UniProt references ---------------------------------------------
 echo "[stage] downloading proteomes and reference sequences (this can take a while) ..."
 python - <<'PY'
 import os, sys, yaml
@@ -104,12 +82,10 @@ prot = H.fetch_cultivar_proteomes(cfg, inputs_dir, base, rel, log)
 print(f"[stage] proteomes staged: {len(prot)}/{len(cfg['cultivars'])} -> {inputs_dir}/proteomes")
 PY
 
-# --- 4. external database cache ----------------------------------------------------
 echo "[stage] warming the UniProt/InterPro cache ..."
 python external_data.py --warm-cache --config config.yaml || \
   echo "[stage] WARNING: external cache warm-up failed; trees will be midpoint-rooted."
 
-# --- 5. HMM + Zenodo caches (compute nodes have no internet) ------------------------
 echo "[stage] pre-fetching Pfam HMMs, Swiss-Prot seeds and the Zenodo tables ..."
 python prefetch_caches.py --inputs "$PROJECT_DIR/inputs" || \
   echo "[stage] WARNING: prefetch incomplete; domain/transcript steps will fail in the job."

@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild proteotype_naming.csv with deterministic composite identifiers and report
-exactly which names changed.
-
-Runs only the naming step - it needs proteotypes.csv, members.csv and
-diamond_hits_all.csv, all of which already exist in the build directory. No DIAMOND,
-no alignment, no pipeline re-run.
-
-Usage
-    python rebuild_naming.py --inputs outputs/latest
-    python rebuild_naming.py --inputs outputs/latest --code . --dry-run
-"""
+"""Rebuild proteotype_naming.csv with deterministic composite identifiers and report"""
 import argparse, os, shutil, sys, glob, csv, datetime
 
 def find(root, name):

@@ -1,42 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-tree_tools.py - post-process and render the FastTree phylogenies of the wheat
-pan-proteome pipeline.
-
-FastTree writes Shimodaira-Hasegawa-like local support values into the Newick
-file by default, but the original `make_all_figures.py` renderer discarded them
-and drew every tree unrooted. Reviewers cannot judge a clade-level claim from
-such a figure. This module fixes that end to end:
-
-  * parse Newick preserving internal support labels;
-  * report the distribution of support across internal nodes;
-  * COLLAPSE internal nodes whose support is below a threshold into
-    polytomies, so that unsupported structure is not drawn as if resolved;
-  * ROOT the tree, either at the midpoint or on a user-supplied outgroup;
-  * QUERY the support of a named clade (e.g. the group-2 RCA-like clade), which
-    is what a "is this a real lineage?" review comment actually asks for;
-  * RENDER a circular phylogram with support values printed at internal nodes
-    and tips coloured by reference status.
-
-Usage
------
-    # summary + clade test, no files written
-    python tree_tools.py --tree RCA.nwk --report \
-        --clade RCA_PT004,RCA_PT010,RCA_PT013,RCA_PT014,RCA_PT015,\
-RCA_PT017,RCA_PT020,RCA_PT021,RCA_PT022,RCA_PT025
-
-    # collapse weak nodes, midpoint-root, write Newick + figure
-    python tree_tools.py --tree RCA.nwk --collapse 0.8 --root midpoint \
-        --out-nwk RCA.supported.nwk --out-png Figure3_RCA_tree.png \
-        --proteotypes proteotypes.csv
-
-    # root on an explicit outgroup instead
-    python tree_tools.py --tree CPN60.nwk --root outgroup \
-        --outgroup CPN60_PT101,CPN60_PT102 --out-png Figure4.png
-
-Dependencies: numpy, matplotlib, pandas (pandas only for --proteotypes).
-"""
+"""tree_tools.py - post-process and render the FastTree phylogenies of the wheat"""
 from __future__ import annotations
 
 import argparse
@@ -47,16 +11,8 @@ from collections import Counter
 
 import numpy as np
 
-# --------------------------------------------------------------------------------------
-# Newick I/O (support-preserving)
-# --------------------------------------------------------------------------------------
 def parse_newick(text):
-    """Newick -> nested dict {name, length, support, children}.
-
-    Differs from the parser in make_all_figures.py in one important respect: the
-    internal-node label is retained as a float `support` rather than an opaque
-    string, so it can be compared, collapsed on, and drawn.
-    """
+    """Newick -> nested dict {name, length, support, children}."""
     text = text.strip()
     if text.endswith(";"):
         text = text[:-1]
@@ -108,9 +64,6 @@ def to_newick(n, support_decimals=3):
     return f"{n['name']}:{n['length']:.9f}"
 
 
-# --------------------------------------------------------------------------------------
-# Tree utilities
-# --------------------------------------------------------------------------------------
 def leaves(n):
     if not n["children"]:
         return [n]
@@ -148,13 +101,7 @@ def support_summary(root):
 
 
 def collapse_unsupported(root, threshold):
-    """Collapse internal nodes with support < threshold into their parent.
-
-    The children of a collapsed node are re-attached to the parent and the
-    collapsed node's branch length is added to each child, which preserves
-    root-to-tip distances. The result is a polytomy: honest about the fact that
-    the data do not resolve that split.
-    """
+    """Collapse internal nodes with support < threshold into their parent."""
     n_collapsed = [0]
 
     def walk(n):
@@ -220,7 +167,6 @@ def _reroot_on_edge(root, target, frac=0.5):
     above_len = blen * (1.0 - frac)
     below["length"] = blen * frac
 
-    # invert the parent chain above `target`
     prev = new_root
     node = parents[id(target)]
     child = target
@@ -231,7 +177,6 @@ def _reroot_on_edge(root, target, frac=0.5):
         node_len = node["length"]
         node["length"] = carry
         if nxt is None:
-            # old root: if it is left with a single child, splice it out
             if len(node["children"]) == 1:
                 only = node["children"][0]
                 only["length"] += node["length"]
@@ -250,24 +195,18 @@ def _reroot_on_edge(root, target, frac=0.5):
 
 
 def midpoint_root(root):
-    """Root at the midpoint of the longest tip-to-tip path.
-
-    Standard practice when no outgroup sequence is available. It is a weaker
-    statement than outgroup rooting and should be reported as such.
-    """
+    """Root at the midpoint of the longest tip-to-tip path."""
     dist, path = _tip_distances(root)
     if len(dist) < 2:
         return root
     names = list(dist)
 
-    # farthest pair via the two-sweep heuristic on an additive tree
     def farthest_from(a):
         best, bd = None, -1.0
         pa = set(id(x) for x in path[a])
         for b in names:
             if b == a:
                 continue
-            # distance = d(a)+d(b)-2*d(mrca)
             mrca_d = 0.0
             for x in path[b]:
                 if id(x) in pa:
@@ -282,7 +221,6 @@ def midpoint_root(root):
     def dist_to_node(n):
         if id(n) in depth_cache:
             return depth_cache[id(n)]
-        # distance root->n, computed once by walking the stored paths
         depth_cache[id(n)] = sum(max(0.0, x["length"]) for x in _chain_to(n))
         return depth_cache[id(n)]
 
@@ -307,7 +245,6 @@ def midpoint_root(root):
     if diam <= 0:
         return root
 
-    # walk from `a` toward the root accumulating length until half the diameter
     half = diam / 2.0
     acc, node = 0.0, None
     cur = None
@@ -349,11 +286,7 @@ def outgroup_root(root, outgroup_names):
 
 
 def clade_support(root, members):
-    """Is `members` recovered as a clade? Return (found, support, extra, missing).
-
-    `extra` are tips inside the smallest clade containing all members but not in
-    `members`; an empty `extra` means the group is monophyletic.
-    """
+    """Is `members` recovered as a clade? Return (found, support, extra, missing)."""
     want = set(members)
     best, best_names = None, None
     for n in internal_nodes(root):
@@ -366,9 +299,6 @@ def clade_support(root, members):
     return (best_names == want), best.get("support"), best_names - want, set()
 
 
-# --------------------------------------------------------------------------------------
-# Rendering (circular phylogram with support values)
-# --------------------------------------------------------------------------------------
 def render_circular(root, out_png, novel_ids=None, prefix="", label_fontsize=None,
                     show_support_above=0.7, title_note=None):
     import matplotlib
@@ -460,9 +390,6 @@ def render_circular(root, out_png, novel_ids=None, prefix="", label_fontsize=Non
     return out_png
 
 
-# --------------------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)

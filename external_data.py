@@ -1,37 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-external_data.py - enrich the pan-proteome with primary database records
-(UniProtKB, InterPro, NCBI Entrez).
-
-Why this module exists
-----------------------
-Two of the questions the pipeline could not previously answer are database
-lookups, not computations:
-
-  1. "Is this divergent clade really Rubisco activase, or is it CbbX or some
-     other AAA+ ATPase?"  Answering it needs the protein NAME, the Pfam/InterPro
-     DOMAIN complement and the SUBCELLULAR LOCATION of each proteotype's closest
-     characterised homologue - all of which UniProtKB serves.
-  2. "Root the tree on an outgroup."  That needs outgroup SEQUENCES, which
-     UniProt also serves, and which must be added to the alignment before
-     FastTree runs (you cannot root on a taxon that is not in the tree).
-
-Everything is cached on disk, so a re-run costs nothing and an offline compute
-node still works provided the cache was warmed on a login node
-(`python external_data.py --warm-cache --config config.yaml`).
-
-Endpoints used
---------------
-  UniProtKB REST   https://rest.uniprot.org/uniprotkb/{acc}.json   (annotation)
-                   https://rest.uniprot.org/uniprotkb/{acc}.fasta  (sequence)
-  InterPro REST    https://www.ebi.ac.uk/interpro/api/entry/all/protein/uniprot/{acc}
-  NCBI E-utilities https://eutils.ncbi.nlm.nih.gov/entrez/eutils/  (esummary/efetch)
-
-NCBI asks for an identifying email and (optionally) an API key; set
-`external.ncbi_email` / `external.ncbi_api_key` in config.yaml. Requests are
-rate-limited to stay inside NCBI's 3/sec anonymous limit.
-"""
+"""external_data.py - enrich the pan-proteome with primary database records"""
 from __future__ import annotations
 
 import argparse
@@ -50,7 +19,7 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 UA = "wheat-panproteome/3.0 (+https://github.com/)"
 
 _LAST_CALL = [0.0]
-_MIN_INTERVAL = 0.34          # ~3 requests/second, NCBI's anonymous ceiling
+_MIN_INTERVAL = 0.34
 
 
 def _throttle():
@@ -69,7 +38,7 @@ def _get(url, timeout=60, retries=3, log=None):
                                                        "Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last = e
             if log:
                 log.debug("GET failed (%d/%d) %s: %s", attempt, retries, url, e)
@@ -96,9 +65,6 @@ def _cached(cache_dir, kind, key, fetch, log=None):
     return txt
 
 
-# --------------------------------------------------------------------------------------
-# UniProtKB
-# --------------------------------------------------------------------------------------
 def uniprot_record(acc, cache_dir, log=None) -> dict:
     """Full UniProtKB JSON record for one accession (cached)."""
     txt = _cached(cache_dir, "uniprot_json", acc + ".json",
@@ -107,7 +73,7 @@ def uniprot_record(acc, cache_dir, log=None) -> dict:
         return {}
     try:
         return json.loads(txt)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
 
 
@@ -166,7 +132,7 @@ def interpro_entries(acc, cache_dir, log=None) -> str:
         return ""
     try:
         js = json.loads(txt)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ""
     out = []
     for r in js.get("results", []):
@@ -176,9 +142,6 @@ def interpro_entries(acc, cache_dir, log=None) -> str:
     return ";".join(out)
 
 
-# --------------------------------------------------------------------------------------
-# NCBI Entrez (optional context, e.g. protein titles for accessions not in UniProt)
-# --------------------------------------------------------------------------------------
 def ncbi_esummary(db, term, cache_dir, email="", api_key="", log=None) -> dict:
     q = {"db": db, "term": term, "retmode": "json", "retmax": "1"}
     if email:
@@ -191,7 +154,7 @@ def ncbi_esummary(db, term, cache_dir, email="", api_key="", log=None) -> dict:
         return {}
     try:
         ids = json.loads(txt).get("esearchresult", {}).get("idlist", [])
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
     if not ids:
         return {}
@@ -205,20 +168,12 @@ def ncbi_esummary(db, term, cache_dir, email="", api_key="", log=None) -> dict:
                    lambda: _get(url2, log=log), log)
     try:
         return json.loads(txt2).get("result", {}).get(ids[0], {})
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
 
 
-# --------------------------------------------------------------------------------------
-# pipeline entry points
-# --------------------------------------------------------------------------------------
 def annotate_naming_table(naming_csv, cache_dir, cfg, log=None):
-    """Add UniProt/InterPro annotation columns to proteotype_naming.csv.
-
-    Gives every proteotype the protein name, gene name, Pfam and InterPro domain
-    complement and subcellular location of its closest characterised homologue,
-    which is what a family-identity claim has to be argued from.
-    """
+    """Add UniProt/InterPro annotation columns to proteotype_naming.csv."""
     if not os.path.exists(naming_csv):
         if log:
             log.warning("[external] %s not found; annotation skipped", naming_csv)
@@ -251,12 +206,7 @@ def annotate_naming_table(naming_csv, cache_dir, cfg, log=None):
 
 
 def append_outgroups(family_fasta, accessions, cache_dir, cfg, log=None):
-    """Append outgroup sequences to a family FASTA before alignment.
-
-    Returns the record ids actually added, which the caller feeds to
-    alignment.outgroup so the tree can be rooted on them. Sequences that cannot
-    be fetched are skipped silently rather than aborting the run.
-    """
+    """Append outgroup sequences to a family FASTA before alignment."""
     if not accessions:
         return []
     have = set()

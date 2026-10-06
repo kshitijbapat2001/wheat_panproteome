@@ -1,48 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-hpc_pipeline.py  --  Extended pan-proteome of RCA and Cpn60 across bread wheat cultivars
-=========================================================================================
-
-Purpose
--------
-Build an *extended, protein-level pan-proteome* for two heat-tolerance protein families in
-hexaploid bread wheat (Triticum aestivum):
-
-    * RCA    - Rubisco activase (thermolabile regulator of photosynthesis)
-    * Cpn60  - Chaperonin-60 (chloroplast chaperone that assists RCA/Rubisco folding)
-
-For a panel of cultivars it discovers every RCA/Cpn60 homolog, collapses them into
-non-redundant "proteotypes", flags variants that are novel relative to Chinese Spring,
-aligns each family, builds a tree, computes thermostability-associated physicochemical
-descriptors, and (when the user supplies a heat phenotype) compares resistant vs sensitive
-cultivars.
-
-Why this differs from the original VCF/genome pipeline
-------------------------------------------------------
-The previous version projected an Ensembl "master VCF" onto the Chinese Spring reference.
-That approach (a) depends on a multi-sample VCF whose columns are named per-cultivar, which
-Ensembl Plants does not provide in that form; (b) cannot discover isoforms absent from
-Chinese Spring - precisely the "new variants across cultivars" of interest; and (c)
-required a 5 GB genome download + `tabix`. This rewrite works directly from the annotated
-*proteomes* that Ensembl Plants publishes per cultivar, which is lighter, HPC-friendly, and
-actually captures novel isoforms.
-
-Honesty / scope notes (read these before interpreting output)
--------------------------------------------------------------
-* Physicochemical descriptors (instability index, aliphatic index, GRAVY, charged-residue
-  content, etc.) are *sequence-derived proxies* correlated with thermostability in the
-  protein-engineering literature. They are descriptive features and hypotheses - NOT a
-  measurement or proof of thermostability of any given variant.
-* Resistant vs sensitive classification is a biological ground-truth that only the
-  researcher can supply (from phenotyping or cited studies). The pipeline automates
-  everything computable; it will *not* invent phenotype labels. The comparison stage runs
-  only when >=2 cultivars are labelled in each group in the config.
-* "Known thermostability residues" overlaid from config are optional and must be verified by
-  the user against the specific reference/coordinate system they cite.
-
-Author: rebuilt for Pawsey Setonix. Requires the conda env in environment.yml.
-"""
+"""hpc_pipeline.py  --  Extended pan-proteome of RCA and Cpn60 across bread wheat cultivars"""
 
 from __future__ import annotations
 
@@ -67,20 +25,11 @@ from collections import Counter, defaultdict
 import numpy as np
 import pandas as pd
 
-# Matplotlib must select a non-interactive backend before pyplot is imported (headless HPC).
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-# --- figure resolution ------------------------------------------------
-# Set once here so every savefig in this module writes at publication DPI.
-# Without this the genome-wide figures fall back to matplotlib's default 100.
+import matplotlib.pyplot as plt
 plt.rcParams.update({"figure.dpi": 600, "savefig.dpi": 600})
 
-# --- figure size guard ---------------------------------------------------------------
-# Figure size scales with content here (a 141-row heatmap is ~58 inches tall). At 600 dpi
-# that is 189 megapixels: slow to write, impossible to open, and Pillow refuses to read
-# it at all ("decompression bomb"). Clamp the effective dpi so no figure exceeds
-# MAX_FIG_PIXELS, never going below 300, which is the usual journal minimum.
 MAX_FIG_PIXELS = 60e6
 MIN_FIG_DPI = 300
 try:
@@ -97,7 +46,7 @@ try:
         return _orig_savefig(self, *args, **kw)
 
     _mfig.Figure.savefig = _clamped_savefig
-except Exception:  # noqa: BLE001
+except Exception:
     pass
 
 def _panel_letter(ax, letter, dx=-52, dy=16):
@@ -105,22 +54,21 @@ def _panel_letter(ax, letter, dx=-52, dy=16):
     ax.annotate(letter, xy=(0, 1), xycoords="axes fraction", xytext=(dx, dy),
                 textcoords="offset points", fontsize=14, fontweight="bold",
                 va="bottom", ha="left")
-from matplotlib.patches import Patch  # noqa: E402
-from matplotlib.colors import ListedColormap  # noqa: E402
+from matplotlib.patches import Patch
+from matplotlib.colors import ListedColormap
 
 try:
     import seaborn as sns
     _HAVE_SNS = True
-except Exception:  # pragma: no cover
+except Exception:
     _HAVE_SNS = False
 
 try:
     from scipy import stats as scipy_stats
     _HAVE_SCIPY = True
-except Exception:  # pragma: no cover
+except Exception:
     _HAVE_SCIPY = False
 
-# Biopython is only needed for sequence/alignment/tree I/O in the full run (not in --selftest).
 try:
     from Bio import SeqIO, AlignIO, Phylo
     from Bio.Seq import Seq
@@ -128,27 +76,22 @@ try:
     try:
         from Bio.SeqUtils.ProtParam import ProteinAnalysis
         _HAVE_PROTPARAM = True
-    except Exception:  # pragma: no cover
+    except Exception:
         _HAVE_PROTPARAM = False
     _HAVE_BIO = True
-except Exception:  # pragma: no cover
+except Exception:
     _HAVE_BIO = False
     _HAVE_PROTPARAM = False
 
 
-# --------------------------------------------------------------------------------------
-# Constants: amino-acid property tables (pure-python, so analysis needs no external tool)
-# --------------------------------------------------------------------------------------
 STANDARD_AA = "ACDEFGHIKLMNPQRSTVWY"
 
-# Kyte & Doolittle hydropathy (for GRAVY).
 KD = {
     "A": 1.8, "R": -4.5, "N": -3.5, "D": -3.5, "C": 2.5, "Q": -3.5, "E": -3.5,
     "G": -0.4, "H": -3.2, "I": 4.5, "L": 3.8, "K": -3.9, "M": 1.9, "F": 2.8,
     "P": -1.6, "S": -0.8, "T": -0.7, "W": -0.9, "Y": -1.3, "V": 4.2,
 }
 
-# Average residue masses (Da), water added once for the full chain.
 AA_MASS = {
     "A": 71.0788, "R": 156.1875, "N": 114.1038, "D": 115.0886, "C": 103.1388,
     "E": 129.1155, "Q": 128.1307, "G": 57.0519, "H": 137.1411, "I": 113.1594,
@@ -157,14 +100,12 @@ AA_MASS = {
 }
 WATER = 18.01524
 
-# pKa set for a simple isoelectric-point estimate (used when Biopython is unavailable).
 PK = {"Nterm": 8.6, "Cterm": 3.6, "C": 8.5, "D": 3.9, "E": 4.1,
       "H": 6.5, "K": 10.8, "R": 12.5, "Y": 10.1}
 
 HYDROPHOBIC = set("AVILMFWC")
 FAMILIES = ("RCA", "CPN60")
-FAM_DISPLAY = {"RCA": "RCA", "CPN60": "Cpn60"}   # nicer labels in figures
-# Publication figure palette (kept consistent across every plot).
+FAM_DISPLAY = {"RCA": "RCA", "CPN60": "Cpn60"}
 FIG_BLUE, FIG_RED, FIG_ABSENT, FIG_GREY = "#3B6FB6", "#C24B4B", "#F2F3F5", "#B8BEC7"
 FIG_AMBER = "#E4A340"
 CULT_LABELS = {
@@ -175,9 +116,6 @@ CULT_LABELS = {
 FAM_DISP = {"RCA": "RCA", "CPN60": "Cpn60"}
 
 
-# --------------------------------------------------------------------------------------
-# Small utilities
-# --------------------------------------------------------------------------------------
 def get_timestamp() -> str:
     return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -266,7 +204,7 @@ def http_get_text(url: str, cfg, log) -> str:
             req = urllib.request.Request(url, headers={"User-Agent": "wheat-panproteome/2.0"})
             with urllib.request.urlopen(req, timeout=120) as r:
                 return r.read().decode("utf-8", "replace")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last = e
             log.warning("GET text failed (%d/%d) %s: %s", attempt, retries, url, e)
             time.sleep(delay * attempt)
@@ -274,8 +212,7 @@ def http_get_text(url: str, cfg, log) -> str:
 
 
 def http_download(url: str, dest: str, cfg, log, gunzip: bool = False) -> str:
-    """Download `url` to `dest`. If gunzip and the URL ends in .gz, decompress to `dest`.
-    Caching: skip if `dest` already exists with non-zero size (idempotent restart)."""
+    """Download `url` to `dest`. If gunzip and the URL ends in .gz, decompress to `dest`."""
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         log.info("cache hit  : %s", os.path.basename(dest))
         return dest
@@ -299,7 +236,7 @@ def http_download(url: str, dest: str, cfg, log, gunzip: bool = False) -> str:
             if os.path.getsize(dest) == 0:
                 raise RuntimeError("downloaded file is empty")
             return dest
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last = e
             log.warning("download failed (%d/%d): %s", attempt, retries, e)
             if os.path.exists(tmp):
@@ -319,21 +256,18 @@ def list_dir_hrefs(url: str, cfg, log):
     return re.findall(r'href="([^"?/][^"]*)"', html)
 
 
-# --------------------------------------------------------------------------------------
-# Configuration
-# --------------------------------------------------------------------------------------
 DEFAULT_CONFIG = {
     "whole_proteome": {
         "enabled": True,
-        "resume": True,             # reuse cached vs-reference searches across runs
-        "work_dir": "",             # default: <inputs_dir>/whole_proteome_work (persistent)
-        "collapse_isoforms": True,  # one (longest) protein per gene
+        "resume": True,
+        "work_dir": "",
+        "collapse_isoforms": True,
         "min_identity": 40, "min_coverage": 60, "evalue": 1e-5,
         "cluster_novel": True, "cluster_approx_id": 90, "cluster_member_cover": 80,
-        "sensitivity": "",          # "" = DIAMOND default (fast). --more-sensitive is far slower.
-        "block_size_gb": 2.0,       # DIAMOND memory is roughly 6 x block_size GB
+        "sensitivity": "",
+        "block_size_gb": 2.0,
         "index_chunks": 4,
-        "memory_limit_gb": 48,      # ceiling for `diamond cluster` (keep < SLURM --mem)
+        "memory_limit_gb": 48,
         "fallback_max_target_seqs": 25,
     },
     "project": {
@@ -343,9 +277,6 @@ DEFAULT_CONFIG = {
     },
     "network": {"http_proxy": "", "https_proxy": "", "retries": 4, "retry_delay_seconds": 5},
     "ensembl": {"release": "current",
-                # Ensembl Genomes data is served from EBI (valid TLS cert). The old
-                # ftp.ensemblgenomes.org host currently presents a mismatched certificate,
-                # so it is only a last-resort fallback (via http, which sidesteps the cert).
                 "division_ftp": "https://ftp.ebi.ac.uk/ensemblgenomes/pub/plants",
                 "division_ftp_fallbacks": [
                     "http://ftp.ebi.ac.uk/ensemblgenomes/pub/plants",
@@ -354,7 +285,7 @@ DEFAULT_CONFIG = {
                 ]},
     "references": {
         "uniprot_rest": "https://rest.uniprot.org/uniprotkb/stream",
-        "max_per_family": 200,   # 50 truncated RCA; Cpn60 returned only 2
+        "max_per_family": 200,
         "RCA": {
             "uniprot_query": '(taxonomy_id:4565) AND (protein_name:"rubisco activase" '
                              'OR protein_name:"ribulose bisphosphate carboxylase/oxygenase activase" '
@@ -362,11 +293,6 @@ DEFAULT_CONFIG = {
             "fasta": "",
         },
         "CPN60": {
-            # WIDENED after review. The previous query returned only TWO sequences
-            # (P08823, A0A2I4JD18). Two queries at 40% identity against a 130k-protein
-            # proteome recruit the entire group I chaperonin superfamily, mitochondrial
-            # CPN60 included, and every family statistic downstream becomes
-            # uninterpretable. See panproteome_audit.specificity_audit().
             "uniprot_query": '(taxonomy_id:4565) AND (protein_name:"chaperonin 60" '
                              'OR protein_name:"60 kDa chaperonin" '
                              'OR protein_name:"chaperonin-60" '
@@ -375,18 +301,15 @@ DEFAULT_CONFIG = {
                              'OR protein_name:"Chaperonin CPN60" '
                              'OR gene:cpn60 OR gene:cpn60a OR gene:cpn60b OR gene:hsp60)',
             "fasta": "",
-            "min_references": 6,   # warn loudly below this
+            "min_references": 6,
         },
     },
-    "cultivars": {},         # populated from config.yaml
+    "cultivars": {},
     "homology": {
         "min_identity": 40.0, "min_query_coverage": 60.0, "max_evalue": 1e-20,
         "diamond_sensitivity": "--more-sensitive", "max_target_seqs": 500, "threads": 8,
     },
     "alignment": {"mafft_args": "--auto --maxiterate 1000",
-                  # Tree post-processing (tree_tools.py). Nodes with SH-like local support
-                  # below collapse_support_below become polytomies; root is "midpoint",
-                  # "outgroup" or "none". Outgroup tip lists are per family.
                   "collapse_support_below": 0.8,
                   "root": "midpoint",
                   "outgroup": {"RCA": [], "CPN60": []},
@@ -394,12 +317,8 @@ DEFAULT_CONFIG = {
     "thermostability": {"RCA_residues": [], "CPN60_residues": []},
     "report": {"title": "Extended pan-proteome of RCA and Cpn60 across bread wheat cultivars",
                "make_docx": True,
-               # Radial ("circos") PAV plots are withdrawn: they carry no genomic
-               # coordinates, so they cannot show where a proteotype sits in the genome.
-               # audit/cs_locus_table.csv replaces them.
                "draw_circos": False,
                "candidate_clade": []},
-    # --- external database enrichment (UniProt / InterPro / NCBI) --------------------
     "external": {
         "enabled": True,
         "annotate_proteotypes": True,
@@ -411,7 +330,6 @@ DEFAULT_CONFIG = {
             "CPN60": ["P0A6F5"],
         },
     },
-    # --- final publication bundle ----------------------------------------------------
     "final_outputs": {"enabled": True, "dirname": "final", "build_manuscript": True},
 }
 
@@ -430,8 +348,8 @@ def load_config(path: str, log=None) -> dict:
     user = {}
     if path and os.path.exists(path):
         try:
-            import yaml  # PyYAML is in the env
-        except Exception as e:  # pragma: no cover
+            import yaml
+        except Exception as e:
             raise RuntimeError("PyYAML is required to read config.yaml") from e
         with open(path) as fh:
             user = yaml.safe_load(fh) or {}
@@ -439,8 +357,6 @@ def load_config(path: str, log=None) -> dict:
         log.warning("Config file %s not found; using built-in defaults.", path)
     cfg = _deep_merge(DEFAULT_CONFIG, user)
     if not cfg["cultivars"]:
-        # Minimal default panel (Ensembl Plants strain dirs). Groups start 'unknown' on
-        # purpose - set them in config.yaml from your phenotyping before comparing.
         cfg["cultivars"] = {
             "chinese_spring": {"ensembl_strain": "triticum_aestivum", "group": "unknown"},
             "jagger":       {"ensembl_strain": "triticum_aestivum_jagger", "group": "unknown"},
@@ -456,9 +372,6 @@ def load_config(path: str, log=None) -> dict:
     return cfg
 
 
-# --------------------------------------------------------------------------------------
-# Stage 1: reference query sequences (UniProt) + Ensembl release resolution
-# --------------------------------------------------------------------------------------
 def ensembl_bases(cfg):
     """Ordered, de-duplicated list of Ensembl base URLs to try (primary + fallbacks)."""
     raw = [cfg["ensembl"].get("division_ftp")] + list(
@@ -475,8 +388,7 @@ def ensembl_bases(cfg):
 
 
 def resolve_release(cfg, log):
-    """Return (base_url, release_dir). Tries each candidate host until one responds, so a
-    single mirror with a broken TLS cert or outage cannot stall the run."""
+    """Return (base_url, release_dir). Tries each candidate host until one responds, so a"""
     bases = ensembl_bases(cfg)
     rel = str(cfg["ensembl"]["release"]).strip()
     if rel and rel.lower() != "current":
@@ -486,11 +398,10 @@ def resolve_release(cfg, log):
                 list_dir_hrefs(f"{base}/{release_dir}/fasta/", cfg, log)
                 log.info("Using Ensembl host %s (%s)", base, release_dir)
                 return base, release_dir
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.warning("Ensembl host not usable (%s): %s", base, e)
         log.warning("No host confirmed %s; proceeding with %s anyway.", release_dir, bases[0])
         return bases[0], release_dir
-    # release == "current": resolve the newest release-N on the first host that lists it
     for base in bases:
         try:
             hrefs = list_dir_hrefs(base, cfg, log)
@@ -500,7 +411,7 @@ def resolve_release(cfg, log):
                 release_dir = f"release-{max(nums)}"
                 log.info("Resolved Ensembl host %s release %s", base, release_dir)
                 return base, release_dir
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("Could not list Ensembl host %s: %s", base, e)
     log.warning("Could not resolve a release from any host; trying 'current' on %s.", bases[0])
     return bases[0], "current"
@@ -528,7 +439,6 @@ def fetch_reference_sequences(cfg, refs_dir, log):
                    + "&query=" + urllib.parse.quote(q))
             log.info("[ref] %s: querying UniProt", fam)
             http_download(url, out, cfg, log, gunzip=False)
-        # record ids -> family
         n = 0
         with open(out) as fh:
             for line in fh:
@@ -551,7 +461,6 @@ def fetch_reference_sequences(cfg, refs_dir, log):
     per_family_paths["combined"] = combined
     per_family_paths["qid2family"] = qid2family
 
-    # --- record the query set itself: it determines what the survey can possibly find --
     rows = []
     for fam in FAMILIES:
         n_fam = sum(1 for f in qid2family.values() if f == fam)
@@ -573,14 +482,11 @@ def fetch_reference_sequences(cfg, refs_dir, log):
         pd.DataFrame(rows).to_csv(qtab, index=False)
         per_family_paths["query_table"] = qtab
         log.info("[ref] query set table -> %s", os.path.basename(qtab))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("[ref] could not write reference_query_sets.csv: %s", e)
     return per_family_paths
 
 
-# --------------------------------------------------------------------------------------
-# Stage 2: per-cultivar proteomes from Ensembl Plants (or local override)
-# --------------------------------------------------------------------------------------
 def resolve_pep_url(base, release_dir, strain, cfg, log):
     pep_dir = f"{base}/{release_dir}/fasta/{strain}/pep/"
     hrefs = list_dir_hrefs(pep_dir, cfg, log)
@@ -593,8 +499,7 @@ def resolve_pep_url(base, release_dir, strain, cfg, log):
 
 
 def fetch_cultivar_proteomes(cfg, inputs_dir, base, release_dir, log, only=None):
-    """Return {cultivar: local_proteome_fasta_path}. Fault-tolerant: cultivars whose
-    proteome cannot be resolved/downloaded are skipped with a warning."""
+    """Return {cultivar: local_proteome_fasta_path}. Fault-tolerant: cultivars whose"""
     prot_dir = os.path.join(inputs_dir, "proteomes")
     os.makedirs(prot_dir, exist_ok=True)
     result = {}
@@ -612,7 +517,7 @@ def fetch_cultivar_proteomes(cfg, inputs_dir, base, release_dir, log, only=None)
                         with gzip.open(local, "rb") as gi, open(dest, "wb") as go:
                             shutil.copyfileobj(gi, go)
                 else:
-                    dest = local  # use in place
+                    dest = local
                 log.info("[proteome] %-14s local -> %s", cult, dest)
             else:
                 strain = meta.get("ensembl_strain")
@@ -624,7 +529,7 @@ def fetch_cultivar_proteomes(cfg, inputs_dir, base, release_dir, log, only=None)
             if os.path.getsize(dest) == 0:
                 raise RuntimeError("empty proteome file")
             result[cult] = dest
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("[proteome] %-14s SKIPPED: %s", cult, e)
     if not result:
         raise RuntimeError("No cultivar proteomes could be obtained. Check network/proxy, "
@@ -633,9 +538,6 @@ def fetch_cultivar_proteomes(cfg, inputs_dir, base, release_dir, log, only=None)
     return result
 
 
-# --------------------------------------------------------------------------------------
-# Stage 3: homology search (DIAMOND) and homolog extraction
-# --------------------------------------------------------------------------------------
 DIAMOND_FIELDS = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
                   "qstart", "qend", "sstart", "send", "evalue", "bitscore",
                   "qcovhsp", "scovhsp"]
@@ -663,7 +565,6 @@ def diamond_search(diamond, references, proteome_fa, work_dir, cfg, log):
     if not os.path.exists(out) or os.path.getsize(out) == 0:
         return pd.DataFrame(columns=DIAMOND_FIELDS)
     df = pd.read_csv(out, sep="\t", names=DIAMOND_FIELDS)
-    # Belt-and-suspenders filtering (DIAMOND already filtered, but be explicit).
     df = df[(df["pident"] >= cfg["homology"]["min_identity"])
             & (df["qcovhsp"] >= cfg["homology"]["min_query_coverage"])
             & (df["evalue"] <= cfg["homology"]["max_evalue"])]
@@ -671,15 +572,13 @@ def diamond_search(diamond, references, proteome_fa, work_dir, cfg, log):
 
 
 def assign_families(hits: pd.DataFrame, qid2family: dict):
-    """For each subject (proteome protein) choose the family of its best reference hit.
-    Returns {subject_id: (family, best_pident, best_evalue)}."""
+    """For each subject (proteome protein) choose the family of its best reference hit."""
     if hits.empty:
         return {}
     hits = hits.copy()
     hits["family"] = hits["qseqid"].map(lambda q: qid2family.get(q, "NA"))
     hits = hits[hits["family"] != "NA"]
     best = {}
-    # best = lowest evalue, then highest bitscore
     for sid, grp in hits.sort_values(["evalue", "bitscore"],
                                      ascending=[True, False]).groupby("sseqid"):
         top = grp.iloc[0]
@@ -698,7 +597,6 @@ def extract_members(cultivar, proteome_fa, subject_family, log):
     try:
         for sid, (fam, pid, ev) in subject_family.items():
             if sid not in idx:
-                # some pep files strip version suffixes etc.; try a relaxed lookup
                 alt = next((k for k in idx.keys() if k.split(".")[0] == sid.split(".")[0]), None)
                 if alt is None:
                     log.debug("subject %s not found in %s index", sid, cultivar)
@@ -707,10 +605,6 @@ def extract_members(cultivar, proteome_fa, subject_family, log):
             seq = str(idx[sid].seq).rstrip("*")
             if not seq:
                 continue
-            # Resolve the protein model to its parent GENE and chromosome. Ensembl
-            # proteomes hold one record per transcript, so counting records counts splice
-            # isoforms: Chinese Spring returns 22 RCA records from 9 loci. Without these
-            # columns that reads as 22 "copies".
             gene_id = re.sub(r"\.\d+$", "", sid)
             _mc = re.match(r"^Traes[A-Z0-9]{2,4}(\d[ABD]|U)", sid)
             chrom = "un" if (not _mc or _mc.group(1) == "U") else _mc.group(1)
@@ -725,12 +619,8 @@ def extract_members(cultivar, proteome_fa, subject_family, log):
     return members
 
 
-# --------------------------------------------------------------------------------------
-# Stage 4: non-redundant proteotypes + presence/absence
-# --------------------------------------------------------------------------------------
 def dedupe_to_proteotypes(members, reference_cultivar="chinese_spring"):
-    """Collapse identical sequences (per family) into proteotypes.
-    Returns (proteotypes_list, member_records_with_ptid)."""
+    """Collapse identical sequences (per family) into proteotypes."""
     proteotypes = []
     member_records = []
     for fam in FAMILIES:
@@ -738,7 +628,6 @@ def dedupe_to_proteotypes(members, reference_cultivar="chinese_spring"):
         by_seq = defaultdict(list)
         for m in fam_members:
             by_seq[m["seq"]].append(m)
-        # deterministic ordering: more cultivars first, then longer, then sequence
         def sort_key(item):
             seq, ms = item
             culs = {x["cultivar"] for x in ms}
@@ -774,9 +663,6 @@ def build_pav_matrix(proteotypes, cultivars):
     return pd.DataFrame(rows)
 
 
-# --------------------------------------------------------------------------------------
-# Stage 5: alignment + tree per family
-# --------------------------------------------------------------------------------------
 def write_family_fasta(proteotypes, fam, path):
     if not _HAVE_BIO:
         raise RuntimeError("Biopython required to write FASTA.")
@@ -811,9 +697,7 @@ def run_fasttree(fasttree, in_aln, out_nwk, log):
 
 
 def plot_circular_tree(nwk, out_png, title, log, novel_ids=None, family=""):
-    """Draw a Newick tree as a circular (fan) phylogram. Leaf labels are placed on an
-    outer ring in radial orientation (no overlap), tips are coloured by novelty, and thin
-    guide lines connect each tip to its label. Falls back gracefully on any error."""
+    """Draw a Newick tree as a circular (fan) phylogram. Leaf labels are placed on an"""
     novel_ids = novel_ids or set()
     try:
         tree = Phylo.read(nwk, "newick")
@@ -825,14 +709,11 @@ def plot_circular_tree(nwk, out_png, title, log, novel_ids=None, family=""):
             log.warning("Tree for %s has <3 tips; skipping circular tree.", title)
             return None
 
-        # angular position of each leaf (leave a gap at the top so labels never wrap into
-        # each other at 12 o'clock)
         gap = math.radians(14)
         span = 2 * math.pi - gap
         start = math.pi / 2 + gap / 2
         leaf_angle = {t: start + span * i / (n - 1) for i, t in enumerate(terminals)}
 
-        # radius from branch lengths (fall back to topological depth if unavailable)
         depths = tree.depths()
         if not depths or max(depths.values()) == 0:
             depths = tree.depths(unit_branch_lengths=True)
@@ -854,7 +735,6 @@ def plot_circular_tree(nwk, out_png, title, log, novel_ids=None, family=""):
 
         fig, ax = plt.subplots(figsize=((14, 14) if big else (9.5, 9.5)))
         ax.set_aspect("equal"); ax.axis("off")
-        # branches: radial segment for each clade at its own angle + connecting arc at parent radius
         for parent in tree.find_clades(order="level"):
             if not parent.clades:
                 continue
@@ -866,7 +746,6 @@ def plot_circular_tree(nwk, out_png, title, log, novel_ids=None, family=""):
                 x0, y0 = xy(rp, angle[c]); x1, y1 = xy(radius[c], angle[c])
                 ax.plot([x0, x1], [y0, y1], color="#444", lw=0.6)
 
-        # leaf tips, guide lines and radial labels on an outer ring
         r_label = 1.06
         for t in terminals:
             a = leaf_angle[t]; r = radius[t]
@@ -876,7 +755,7 @@ def plot_circular_tree(nwk, out_png, title, log, novel_ids=None, family=""):
             gx, gy = xy(r_label, a)
             ax.plot([tx, gx], [ty, gy], color="#dddddd", lw=0.4, zorder=1)
             deg = math.degrees(a) % 360
-            lab = t.name.split("_", 1)[1] if "_" in t.name else t.name  # strip family prefix
+            lab = t.name.split("_", 1)[1] if "_" in t.name else t.name
             if 90 < deg < 270:
                 rot, ha = deg + 180, "right"
             else:
@@ -889,21 +768,16 @@ def plot_circular_tree(nwk, out_png, title, log, novel_ids=None, family=""):
                       [Patch(facecolor=FIG_BLUE, label="present in Chinese Spring"),
                        Patch(facecolor=FIG_RED, label="novel vs Chinese Spring")],
                       ncol=2, fontsize=9)
-        # No figure title: titles belong in the caption, and a title here collides
-        # with the tip labels at the top of the fan.
         _lim = 1.62 if big else 1.5
         ax.set_xlim(-_lim, _lim); ax.set_ylim(-_lim, _lim)
         fig.savefig(out_png, dpi=600, bbox_inches="tight")
         plt.close(fig)
         return out_png
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("Could not render circular tree for %s: %s", title, e)
         return None
 
 
-# --------------------------------------------------------------------------------------
-# Stage 6: physicochemical (thermostability-associated) descriptors + statistics
-# --------------------------------------------------------------------------------------
 def sanitize_aa(seq: str) -> str:
     return "".join(c for c in seq.upper() if c in STANDARD_AA)
 
@@ -965,8 +839,7 @@ def isoelectric_point(seq: str) -> float:
 
 
 def physicochemical_features(seq_raw: str) -> dict:
-    """Sequence-derived descriptors correlated with thermostability. Composition metrics
-    are pure-python; instability index uses Biopython when available."""
+    """Sequence-derived descriptors correlated with thermostability. Composition metrics"""
     seq = sanitize_aa(seq_raw)
     n = len(seq)
     feats = {"length": len(seq_raw), "length_std_aa": n}
@@ -1006,8 +879,6 @@ THERMO_FEATURES = ["aliphatic_index", "gravy", "instability_index", "frac_charge
                    "frac_acidic_DE", "frac_basic_KR", "net_charge_frac", "frac_proline",
                    "frac_glycine", "frac_arg_of_RK", "pI", "aromaticity"]
 
-# Column schemas so tables/CSVs still have a valid header when a section is empty
-# (a zero-column DataFrame makes sqlite's CREATE TABLE fail with "near ')': syntax error").
 GROUP_COMPARISON_COLS = ["family", "feature", "n_resistant", "n_sensitive",
                          "median_resistant", "median_sensitive", "U", "p_value", "q_value_BH"]
 KNOWN_RESIDUE_COLS = ["family", "reference", "ref_position", "aln_column", "proteotype_id",
@@ -1043,8 +914,7 @@ def groups_from_config(cfg):
 
 
 def compare_group_features(member_features_df, resistant, sensitive, log):
-    """Mann-Whitney U per family per descriptor between resistant and sensitive cultivars.
-    Operates on individual homolog copies (members), each labelled by its cultivar group."""
+    """Mann-Whitney U per family per descriptor between resistant and sensitive cultivars."""
     if not _HAVE_SCIPY:
         log.warning("scipy unavailable; skipping group statistics.")
         return pd.DataFrame(columns=GROUP_COMPARISON_COLS)
@@ -1078,8 +948,7 @@ def compare_group_features(member_features_df, resistant, sensitive, log):
 
 
 def polymorphic_sites(aln_records, fam):
-    """aln_records: dict proteotype_id -> aligned sequence (equal length).
-    Returns DataFrame of variable columns with residue distribution and entropy."""
+    """aln_records: dict proteotype_id -> aligned sequence (equal length)."""
     ids = list(aln_records)
     if len(ids) < 2:
         return pd.DataFrame(columns=["family", "aln_column", "n_variants",
@@ -1103,15 +972,13 @@ def polymorphic_sites(aln_records, fam):
 
 
 def position_group_association(aln_records, member_records, resistant, sensitive, fam, log):
-    """For each polymorphic column, test residue composition vs heat group across members.
-    Each member is mapped to its proteotype's aligned sequence."""
+    """For each polymorphic column, test residue composition vs heat group across members."""
     if not _HAVE_SCIPY:
         return pd.DataFrame(columns=POS_ASSOC_COLS)
     ids = list(aln_records)
     if len(ids) < 2:
         return pd.DataFrame(columns=POS_ASSOC_COLS)
     L = len(aln_records[ids[0]])
-    # expand members (of this family, with a known group) to aligned sequences
     labelled = []
     for m in member_records:
         if m["family"] != fam:
@@ -1138,7 +1005,6 @@ def position_group_association(aln_records, member_records, resistant, sensitive
         sidx = {s: i for i, s in enumerate(symbols)}
         for g, r in residues:
             table[gidx[g], sidx[r]] += 1
-        # drop all-zero columns
         table = table[:, table.sum(axis=0) > 0]
         if table.shape[1] < 2 or (table.sum(axis=1) < 2).any():
             continue
@@ -1167,7 +1033,6 @@ def map_known_residues(cfg, aln_by_family, member_records, log):
         aln = aln_by_family.get(fam, {})
         if not aln:
             continue
-        # proteotype -> cultivars map
         pt2culs = defaultdict(set)
         for m in member_records:
             if m["family"] == fam:
@@ -1180,7 +1045,6 @@ def map_known_residues(cfg, aln_by_family, member_records, log):
                 log.warning("[known-residue] %s ref '%s' not among aligned proteotypes; skipped.",
                             fam, ref_id)
                 continue
-            # map ungapped position -> alignment column
             aseq = aln[ref_id]
             col = None
             seen = 0
@@ -1202,16 +1066,12 @@ def map_known_residues(cfg, aln_by_family, member_records, log):
     return pd.DataFrame(rows, columns=(None if rows else KNOWN_RESIDUE_COLS))
 
 
-# --------------------------------------------------------------------------------------
-# Stage 7: persistence, plots, and a data-driven report
-# --------------------------------------------------------------------------------------
 def write_sqlite(db_path, tables, log):
     conn = sqlite3.connect(db_path)
     try:
         for name, df in tables.items():
             if df is None:
                 continue
-            # A zero-column DataFrame makes sqlite emit `CREATE TABLE "x" ()` -> syntax error.
             if getattr(df, "shape", (0, 0))[1] == 0:
                 log.warning("SQLite: skipping table %s (no columns).", name)
                 continue
@@ -1229,8 +1089,6 @@ def plot_pav_heatmap(pav_df, fam, out_png, log):
     mat = sub.drop(columns=["family"]).set_index("proteotype_id")
     if mat.shape[0] == 0 or mat.shape[1] == 0:
         return None
-    # Height is capped: beyond ~30 inches the rows are unreadable anyway, and the figure
-    # becomes too large to open. Tall matrices belong in the supplementary set.
     fig, ax = plt.subplots(figsize=(max(6, 0.6 * mat.shape[1] + 3),
                                     min(30.0, max(3, 0.4 * mat.shape[0] + 2))))
     if _HAVE_SNS:
@@ -1269,7 +1127,7 @@ def plot_feature_boxplots(member_features_df, resistant, sensitive, fam, out_png
                 for g in ("resistant", "sensitive")]
         try:
             ax.boxplot(data, tick_labels=["resistant", "sensitive"], showmeans=True)
-        except TypeError:  # matplotlib < 3.9 uses `labels`
+        except TypeError:
             ax.boxplot(data, labels=["resistant", "sensitive"], showmeans=True)
         ax.set_title(feat)
     for k in range(len(feats), nrow * ncol):
@@ -1281,8 +1139,7 @@ def plot_feature_boxplots(member_features_df, resistant, sensitive, fam, out_png
 
 
 def plot_entropy(poly_df, fam, out_png, log):
-    """Per-column Shannon entropy along the family alignment, drawn large and legible:
-    bigger fonts, a smoothed trend line, and the peak position annotated."""
+    """Per-column Shannon entropy along the family alignment, drawn large and legible:"""
     sub = poly_df[poly_df["family"] == fam].sort_values("aln_column")
     if sub.empty:
         return None
@@ -1291,7 +1148,6 @@ def plot_entropy(poly_df, fam, out_png, log):
     y = sub["entropy_bits"].to_numpy()
     fig, ax = plt.subplots(figsize=(12, 4.2))
     ax.bar(x, y, width=1.0, color=FIG_RED, alpha=0.85, label="per-column entropy")
-    # smoothed trend (rolling mean) to show where variability concentrates
     if len(y) >= 15:
         w = max(5, len(y) // 40)
         trend = pd.Series(y).rolling(w, center=True, min_periods=1).mean()
@@ -1299,12 +1155,9 @@ def plot_entropy(poly_df, fam, out_png, log):
     ax.set_xlabel("Alignment column", fontsize=14)
     ax.set_ylabel("Shannon entropy (bits)", fontsize=14)
     ax.tick_params(axis="both", labelsize=12)
-    ax.set_ylim(0, max(1.0, y.max() * 1.32))   # headroom for the peak callout
+    ax.set_ylim(0, max(1.0, y.max() * 1.32))
     ax.margins(x=0.01)
     ax.spines[["top", "right"]].set_visible(False)
-    # Peak callout: single line, and anchored away from whichever edge it sits near, so
-    # it stays inside the axes. The legend is moved OUT of the axes (above it), which is
-    # what previously collided with this label.
     imax = int(np.argmax(y))
     frac = (x[imax] - x.min()) / max(1e-9, (x.max() - x.min()))
     ha = "right" if frac > 0.75 else ("left" if frac < 0.25 else "center")
@@ -1329,9 +1182,7 @@ def _novel_set(pav_df, fam):
 
 
 def plot_circos_pav(pav_df, fam, out_png, log):
-    """Circular (circos-style) presence/absence: cultivars as concentric rings, proteotypes
-    as spokes. Improved for legibility: larger canvas, an angular gap that holds horizontal
-    cultivar labels, and radial (non-overlapping) proteotype labels on the outer rim."""
+    """Circular (circos-style) presence/absence: cultivars as concentric rings, proteotypes"""
     sub = pav_df[pav_df["family"] == fam]
     if sub.empty:
         return None
@@ -1344,7 +1195,7 @@ def plot_circos_pav(pav_df, fam, out_png, log):
     disp = FAM_DISPLAY.get(fam, fam)
 
     n = len(proteotypes)
-    gap = math.radians(26)                 # top gap reserved for cultivar labels
+    gap = math.radians(26)
     span = 2 * math.pi - gap
     start = math.pi / 2 + gap / 2
     theta = start + (np.arange(n) + 0.5) * (span / n)
@@ -1364,11 +1215,9 @@ def plot_circos_pav(pav_df, fam, out_png, log):
                 colors.append(FIG_ABSENT)
         ax.bar(theta, [ring_h * 0.9] * n, width=width, bottom=bottom,
                color=colors, edgecolor="white", linewidth=0.3, alpha=0.97)
-        # cultivar label, horizontal, stacked in the top gap
         ax.text(math.pi / 2, bottom + ring_h * 0.45, clabel_display(cult),
                 ha="center", va="center", fontsize=8)
 
-    # radial proteotype labels on the outer rim
     r_label = r0 + len(cultivars) * ring_h + 0.35
     for th, pt in zip(theta, proteotypes):
         deg = math.degrees(th) % 360
@@ -1395,13 +1244,7 @@ def plot_circos_pav(pav_df, fam, out_png, log):
 
 
 def _legend_below(fig, axes, handles, ncol=2, fontsize=10, pad=0.014):
-    """Place a legend underneath everything that has already been drawn.
-
-    Tip labels on a circular tree, and rotated cultivar labels on a heatmap, spill well
-    outside the axes box, so a legend positioned with a guessed offset (or with
-    loc="lower right") lands on top of them. Here the drawn content is measured first and
-    the legend is anchored below its lowest point, which cannot collide by construction.
-    """
+    """Place a legend underneath everything that has already been drawn."""
     fig.canvas.draw()
     r = fig.canvas.get_renderer()
     axes = axes if isinstance(axes, (list, tuple)) else [axes]
@@ -1432,8 +1275,7 @@ def clabel_display(c):
 
 
 def plot_overview(proteotypes, pav_df, cultivars, out_png, log):
-    """Two-panel overview. (a) total vs novel proteotypes per family. (b) number of novel
-    proteotypes of EACH family carried by each cultivar (grouped bars)."""
+    """Two-panel overview. (a) total vs novel proteotypes per family. (b) number of novel"""
     fams = list(FAMILIES)
     total = {f: sum(1 for p in proteotypes if p["family"] == f) for f in fams}
     noveln = {f: sum(1 for p in proteotypes if p["family"] == f and p["novel_vs_reference"])
@@ -1458,7 +1300,6 @@ def plot_overview(proteotypes, pav_df, cultivars, out_png, log):
     axA.spines[["top", "right"]].set_visible(False)
     axA.set_title("a", loc="left", fontweight="bold", fontsize=12)
 
-    # panel b: per-cultivar novel counts, both families
     counts = {f: {} for f in fams}
     for f in fams:
         pv = pav_df[(pav_df["family"] == f) & (pav_df["proteotype_id"].isin(novel_ids[f]))]
@@ -1484,8 +1325,7 @@ def plot_overview(proteotypes, pav_df, cultivars, out_png, log):
 
 
 def plot_novel_pav(proteotypes, pav_df, fam, cultivars, out_png, log, max_rows=None):
-    """Presence/absence matrix of the NOVEL (reference-absent) proteotypes of one family,
-    ordered by prevalence. One tick per row, so labels never overlap."""
+    """Presence/absence matrix of the NOVEL (reference-absent) proteotypes of one family,"""
     novel_ids = _novel_set(pav_df, fam)
     if not novel_ids:
         return None
@@ -1511,8 +1351,6 @@ def plot_novel_pav(proteotypes, pav_df, fam, cultivars, out_png, log, max_rows=N
     ax.grid(which="minor", color="white", linewidth=0.8)
     ax.tick_params(which="both", length=0)
     shown = f"all {n_total}" if (not max_rows or n_total <= max_rows) else f"{len(ids)} of {n_total}"
-    # The count moves into the axis label rather than a title: it states how many rows
-    # are shown, which the reader needs, without a title on the figure.
     ax.set_ylabel(f"{disp} novel proteotypes ({shown})", fontsize=9)
     _legend_below(fig, ax,
                   [Patch(facecolor=FIG_BLUE, label="present"),
@@ -1527,9 +1365,6 @@ def _fmt_pct(n, d):
     return f"{(100.0 * n / d):.1f}%" if d else "n/a"
 
 
-# --------------------------------------------------------------------------------------
-# Genome-wide (whole Chinese Spring reference) pan-proteome + proteotype naming
-# --------------------------------------------------------------------------------------
 def _pangenome_partition(pav_df, cult_cols):
     M = pav_df[cult_cols].to_numpy(bool); prev = M.sum(1); N = len(cult_cols)
     soft = math.ceil(0.9 * N)
@@ -1577,7 +1412,7 @@ def plot_pangenome_overview(pav_df, cult_cols, out_png, log,
         fig.tight_layout()
         fig.savefig(out_png, bbox_inches="tight", dpi=600); plt.close(fig)
         return out_png
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("pangenome overview failed: %s", e); return None
 
 
@@ -1591,7 +1426,7 @@ def plot_prevalence_hist(pav_df, cult_cols, out_png, log):
         ax.set_xticks(range(1, N + 1))
         ax.spines[["top", "right"]].set_visible(False); fig.tight_layout()
         fig.savefig(out_png, bbox_inches="tight", dpi=600); plt.close(fig); return out_png
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("prevalence hist failed: %s", e); return None
 
 
@@ -1610,13 +1445,12 @@ def plot_genomewide_per_cultivar(pav_df, cult_cols, out_png, log):
         ax.set_ylabel("Proteotype clusters", fontsize=10); ax.legend(frameon=False, fontsize=9)
         ax.spines[["top", "right"]].set_visible(False)
         fig.tight_layout(); fig.savefig(out_png, bbox_inches="tight", dpi=600); plt.close(fig); return out_png
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("per-cultivar plot failed: %s", e); return None
 
 
 def parse_uniprot_id(qseqid):
-    """UniProt accession + entry name from a DIAMOND qseqid like
-    'tr|A0A0A0YVQ2|A0A0A0YVQ2_WHEAT' -> ('A0A0A0YVQ2', 'A0A0A0YVQ2_WHEAT')."""
+    """UniProt accession + entry name from a DIAMOND qseqid like"""
     parts = str(qseqid).split("|")
     if len(parts) >= 3:
         return parts[1], parts[2]
@@ -1624,10 +1458,7 @@ def parse_uniprot_id(qseqid):
 
 
 def build_proteotype_naming(inputs_dir, out_csv=None):
-    """Nomenclature/annotation table linking each proteotype to its closest UniProt
-    entry (best DIAMOND hit), representative cultivar + source id, and a
-    composite_id = <proteotype>__<cultivar>__<uniprot>. Needs proteotypes.csv,
-    members.csv, diamond_hits_all.csv in inputs_dir."""
+    """Nomenclature/annotation table linking each proteotype to its closest UniProt"""
     pt = pd.read_csv(os.path.join(inputs_dir, "proteotypes.csv"))
     mem = pd.read_csv(os.path.join(inputs_dir, "members.csv"))
     hits = pd.read_csv(os.path.join(inputs_dir, "diamond_hits_all.csv"))
@@ -1659,8 +1490,6 @@ def build_proteotype_naming(inputs_dir, out_csv=None):
                           "representative_source_id": rep.source_id,
                           "uniprot_id": uacc, "uniprot_entry": uentry})
     _agg_cols = ["cultivar", "source_id", "uacc", "uentry", "hit_evalue", "evalue_to_ref"]
-    # NB: select the non-grouping columns explicitly -> no pandas FutureWarning about
-    # DataFrameGroupBy.apply operating on the grouping columns (works on pandas 1.x-2.x).
     rep = md.groupby("proteotype_id")[_agg_cols].apply(agg).reset_index()
     nm = pt.merge(rep, on="proteotype_id", how="left")
     nm["composite_id"] = nm.apply(
@@ -1676,11 +1505,7 @@ def build_proteotype_naming(inputs_dir, out_csv=None):
 
 
 def _iter_fasta(path):
-    """Stream (record_id, header, sequence) from a FASTA (plain or .gz).
-
-    Deliberately does NOT use Biopython: SeqIO builds a SeqRecord object per entry,
-    which is far too slow/heavy for whole proteomes (10 x ~150k proteins here).
-    """
+    """Stream (record_id, header, sequence) from a FASTA (plain or .gz)."""
     import gzip
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt") as fh:
@@ -1703,8 +1528,7 @@ def _write_fasta_record(fh, rec_id, seq, width=60):
 
 
 def _gene_id_from_header(header, rec_id):
-    """Ensembl Plants pep headers carry 'gene:TraesCS...'; fall back to stripping the
-    trailing transcript suffix (.1/.2/...) from the record id."""
+    """Ensembl Plants pep headers carry 'gene:TraesCS...'; fall back to stripping the"""
     m = re.search(r"\bgene:(\S+)", header)
     if m:
         return m.group(1)
@@ -1712,13 +1536,7 @@ def _gene_id_from_header(header, rec_id):
 
 
 def _collapse_isoforms(in_fa, out_fa, log):
-    """Keep only the longest protein per gene (two streaming passes, low memory).
-
-    Ensembl proteomes contain every transcript isoform (Chinese Spring: ~133k proteins
-    for ~107k genes). Collapsing to one protein per gene makes the pan-proteome
-    gene-level (the standard for pan-genome partitions) and removes the isoform
-    redundancy that made the all-vs-all clustering explode.
-    """
+    """Keep only the longest protein per gene (two streaming passes, low memory)."""
     best = {}
     for rid, header, seq in _iter_fasta(in_fa):
         g = _gene_id_from_header(header, rid)
@@ -1731,7 +1549,7 @@ def _collapse_isoforms(in_fa, out_fa, log):
         for rid, _header, seq in _iter_fasta(in_fa):
             n_in += 1
             if rid in keep:
-                keep.discard(rid)  # guards against duplicated ids
+                keep.discard(rid)
                 _write_fasta_record(fo, rid, seq)
                 n_out += 1
     log.info("    isoform collapse: %d proteins -> %d genes (%s)",
@@ -1740,11 +1558,7 @@ def _collapse_isoforms(in_fa, out_fa, log):
 
 
 def _run_to_logfile(cmd, logfile, log, check=True):
-    """Run a subprocess writing its output straight to a file.
-
-    run_cmd() buffers the whole of stdout/stderr in memory, which is unsafe for the
-    whole-proteome DIAMOND jobs. Here nothing is held in RAM.
-    """
+    """Run a subprocess writing its output straight to a file."""
     printable = " ".join(str(c) for c in cmd)
     log.debug("RUN: %s", printable)
     with open(logfile, "ab") as fh:
@@ -1757,7 +1571,7 @@ def _run_to_logfile(cmd, logfile, log, check=True):
             with open(logfile, "rb") as fh2:
                 fh2.seek(max(0, os.path.getsize(logfile) - 2000))
                 tail = fh2.read().decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         hint = ""
         if proc.returncode == -9:
@@ -1832,26 +1646,17 @@ class _UnionFind:
 
 def _diamond_cluster(diamond, in_fa, out_tsv, log, logfile, threads,
                      approx_id, member_cover, memory_limit_gb):
-    """DIAMOND's built-in cascaded clustering (DIAMOND >=2.1 'cluster' workflow).
-
-    This is designed for exactly this job and is far cheaper than an all-vs-all
-    blastp. Flags are probed from --help so that an older/newer DIAMOND cannot make
-    the command fail. Returns out_tsv, or None if clustering is unavailable/failed
-    (the caller then falls back to blastp + union-find).
-    """
+    """DIAMOND's built-in cascaded clustering (DIAMOND >=2.1 'cluster' workflow)."""
     def _run(args, timeout=120):
         try:
             p = subprocess.run([str(diamond)] + args, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, timeout=timeout)
             return p, (p.stdout or "")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.info("[whole-proteome] could not run 'diamond %s' (%s).",
                      " ".join(args), e)
             return None, ""
 
-    # DIAMOND has no `<command> --help`; it answers "Error: Invalid option: help".
-    # Its own usage text says: "Possible [OPTIONS] for COMMAND can be seen with
-    # syntax: diamond COMMAND". So probe in two steps.
     _p, _cmds = _run(["help"])
     if _p is None:
         return None
@@ -1868,7 +1673,7 @@ def _diamond_cluster(diamond, in_fa, out_tsv, log, logfile, threads,
         _v = subprocess.run([str(diamond), "--version"], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=60)
         log.info("[whole-proteome] %s", (_v.stdout or "").strip().splitlines()[0])
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     log.info("[whole-proteome] using 'diamond cluster' (greedy set-cover, NOT "
              "transitive) at approx-id %s / member-cover %s.", approx_id, member_cover)
@@ -1880,9 +1685,6 @@ def _diamond_cluster(diamond, in_fa, out_tsv, log, logfile, threads,
     if memory_limit_gb and ("--memory-limit" in help_txt or "-M " in help_txt):
         cmd += ["--memory-limit", f"{memory_limit_gb}G"]
     cmd += ["--quiet"]
-    # If the flag probe came back empty (some builds print nothing for a bare
-    # subcommand), pass the documented flags anyway: a wrong flag makes DIAMOND
-    # exit non-zero and the caller falls back, which is safe.
     if "--approx-id" not in help_txt and "--approx-id" not in cmd:
         cmd += ["--approx-id", str(approx_id), "--member-cover", str(member_cover)]
     proc = _run_to_logfile(cmd, logfile, log, check=False)
@@ -1899,16 +1701,7 @@ def _diamond_cluster(diamond, in_fa, out_tsv, log, logfile, threads,
 
 
 def _cluster_novel_sequences(diamond, novel_fa, n_uniq, work, log, logfile, wp, threads):
-    """Group the unique reference-absent proteins into novel proteotype clusters.
-
-    Strategy (each step falls back to the next, so this can degrade but never crash):
-      1. 'diamond cluster'  - cascaded clustering, memory-bounded.
-      2. blastp self-alignment + union-find, with --max-target-seqs > 1.
-         NB: the previous version hard-coded --max-target-seqs 1, so every protein
-         only ever hit ITSELF and the union-find produced nothing but singletons.
-      3. one cluster per unique sequence (still a valid, if conservative, result).
-    Returns a list of lists of unique-sequence indices.
-    """
+    """Group the unique reference-absent proteins into novel proteotype clusters."""
     if n_uniq == 0:
         return []
     if not wp.get("cluster_novel", True):
@@ -1950,12 +1743,6 @@ def _cluster_novel_sequences(diamond, novel_fa, n_uniq, work, log, logfile, wp, 
             ndb = os.path.join(work, "novel_db")
             _diamond_makedb(diamond, novel_fa, ndb, threads, log, logfile)
             nout = os.path.join(work, "novel_self.tsv")
-            # Cluster at cluster_approx_id (default 90%), NOT at min_identity (40%).
-            # min_identity is the "is this a family member" threshold for the search
-            # against the reference; it is far too permissive for deciding that two
-            # proteins are the same thing. Union-find is transitive, so at 40% a chain
-            # A~B~C merges A and C even when they are unrelated, which collapses the
-            # cluster count and inflates the apparent core fraction.
             _cid = float(wp.get("cluster_approx_id", 90))
             _ccov = float(wp.get("cluster_member_cover", 80))
             log.info("[whole-proteome] fallback clustering at %.0f%% identity / %.0f%% "
@@ -1967,7 +1754,7 @@ def _cluster_novel_sequences(diamond, novel_fa, n_uniq, work, log, logfile, wp, 
                 sensitivity=wp.get("sensitivity", ""),
                 block_size=wp.get("block_size_gb"), index_chunks=wp.get("index_chunks"))
             n_edges = 0
-            with open(nout) as fh:   # streamed: never a DataFrame
+            with open(nout) as fh:
                 for line in fh:
                     f = line.rstrip("\n").split("\t")
                     if len(f) < 2:
@@ -1980,7 +1767,7 @@ def _cluster_novel_sequences(diamond, novel_fa, n_uniq, work, log, logfile, wp, 
                         uf.union(a, b)
                         n_edges += 1
             log.info("[whole-proteome] blastp clustering: %d edges.", n_edges)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("[whole-proteome] novel clustering failed (%s); each unique novel "
                         "protein will be reported as its own cluster.", e)
 
@@ -2003,23 +1790,7 @@ def _cluster_novel_sequences(diamond, novel_fa, n_uniq, work, log, logfile, wp, 
 
 
 def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond, cfg, log):
-    """Whole-proteome pan-genome anchored on the ENTIRE Chinese Spring reference.
-
-    Every protein of every cultivar is mapped (DIAMOND) to its best Chinese Spring
-    match; proteins with no acceptable match are 'novel' and are clustered among
-    themselves. Writes genome_wide_pav.csv + pangenome_partition.csv plus the
-    genome-wide figures. Guarded by cfg['whole_proteome']['enabled'].
-
-    Design notes (this stage is the expensive one):
-      * work_dir is PERSISTENT (default <inputs_dir>/whole_proteome_work), not the
-        timestamped result dir, so `resume: true` reuses the vs-reference searches
-        across runs instead of repeating hours of DIAMOND.
-      * proteomes are collapsed to one protein per gene first (optional).
-      * identical novel proteins are de-duplicated by sequence hash before clustering.
-      * every DIAMOND call is memory-bounded and streams its output to disk.
-      * a failure in the novel-clustering step no longer discards the whole stage:
-        the reference-anchored PAV is still written.
-    """
+    """Whole-proteome pan-genome anchored on the ENTIRE Chinese Spring reference."""
     import hashlib
 
     wp = cfg.get("whole_proteome", {})
@@ -2045,9 +1816,6 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
     cults = list(proteomes)
     cidx = {c: i for i, c in enumerate(cults)}
 
-    # Cached searches may only be reused if they were produced with the SAME settings.
-    # (A cache built without isoform collapsing, or at other thresholds, maps onto a
-    # different reference id space and would silently drop presence calls.)
     sig = {"reference": ref_cult, "cultivars": sorted(cults),
            "collapse_isoforms": bool(wp.get("collapse_isoforms", True)),
            "min_identity": min_id, "min_coverage": min_cov, "evalue": evalue,
@@ -2058,7 +1826,7 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
         try:
             with open(sig_path) as fh:
                 old_sig = json.load(fh)
-        except Exception:  # noqa: BLE001
+        except Exception:
             old_sig = None
     if resume and old_sig is not None and old_sig != sig:
         changed = sorted({k for k in set(old_sig) | set(sig) if old_sig.get(k) != sig.get(k)})
@@ -2070,7 +1838,6 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
         json.dump(sig, fh, indent=2, sort_keys=True)
     log.info("[whole-proteome] work dir: %s (resume=%s)", work, resume)
 
-    # ---- 0. one protein per gene (cached) -------------------------------------------
     seqs = dict(proteomes)
     if wp.get("collapse_isoforms", True):
         for c in cults:
@@ -2081,7 +1848,6 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
                 _collapse_isoforms(proteomes[c], tgt, log)
             seqs[c] = tgt
 
-    # ---- 1. reference DIAMOND database ----------------------------------------------
     refdb = os.path.join(work, "ref_db")
     if not (resume and os.path.exists(refdb + ".dmnd")):
         _diamond_makedb(diamond, seqs[ref_cult], refdb, threads, log, logfile)
@@ -2093,10 +1859,9 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
     M = np.zeros((len(ref_ids), len(cults)), dtype=bool)
     M[:, cidx[ref_cult]] = True
 
-    # ---- 2. map every cultivar onto the reference; collect novel proteins -----------
     novel_fa = os.path.join(work, "novel_unique.faa")
-    seen = {}            # sequence md5 -> unique index
-    novel_mask = []      # unique index -> bitmask of cultivars
+    seen = {}
+    novel_mask = []
     n_novel_total = 0
     with open(novel_fa, "w") as fo:
         for cult in cults:
@@ -2137,11 +1902,9 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
     log.info("[whole-proteome] novel proteins: %d total -> %d unique sequences "
              "(exact duplicates merged).", n_novel_total, len(novel_mask))
 
-    # ---- 3. cluster the novel proteins (never fatal) --------------------------------
     groups = _cluster_novel_sequences(diamond, novel_fa, len(novel_mask), work,
                                       log, logfile, wp, threads)
 
-    # ---- 4. assemble the genome-wide presence/absence table -------------------------
     if groups:
         NM = np.zeros((len(groups), len(cults)), dtype=bool)
         for k, members in enumerate(groups):
@@ -2171,13 +1934,6 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
     arts = [("Genome-wide PAV (whole CS reference)", gw_path),
             ("Pan-genome partition table", part_path)]
 
-    # ---- 4b. annotated FASTA catalogue of the ENTIRE extended proteome --------------
-    # One representative sequence per genome-wide proteotype cluster, headed with a
-    # composite identifier in the same spirit as the RCA/Cpn60 catalogue:
-    #   <cluster_id>__<representative cultivar>__<CSref|novel>  + annotation.
-    # Reference-anchored clusters are represented by their Chinese Spring protein; novel
-    # clusters by the first unique member of the cluster. Written by streaming (no whole
-    # proteome is held in memory). Controlled by whole_proteome.write_catalog (default on).
     if wp.get("write_catalog", True):
         catalog = os.path.join(out_dir, "WholeProteome_catalog.annotated.faa")
         N = len(cults)
@@ -2191,7 +1947,6 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
         n_written = 0
         try:
             with open(catalog, "w") as fo:
-                # (a) reference-anchored clusters -> the Chinese Spring representative
                 for rid, _hdr, seq in _iter_fasta(seqs[ref_cult]):
                     row = ridx.get(rid)
                     if row is None or not seq:
@@ -2202,7 +1957,6 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
                            f"prevalence_class={_cls(prev)} novel=False reference_locus={rid}")
                     _write_fasta_record(fo, hdr, seq)
                     n_written += 1
-                # (b) novel clusters -> the representative unique member of each cluster
                 if groups:
                     rep_of = {}
                     for k, members in enumerate(groups):
@@ -2229,7 +1983,7 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
             log.info("[whole-proteome] wrote annotated catalogue: %d cluster records -> %s",
                      n_written, os.path.basename(catalog))
             arts.append(("Whole-proteome annotated FASTA (all clusters)", catalog))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("[whole-proteome] catalogue FASTA failed: %s", e)
 
     pth = plot_pangenome_overview(gw, cults, os.path.join(out_dir, "Figure_pangenome_overview.png"), log)
@@ -2245,8 +1999,7 @@ def run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond
 
 
 def generate_report(out_dir, cfg, ctx, log):
-    """Write a data-driven Markdown report (+ optional DOCX). No pre-baked conclusions:
-    numbers come from `ctx` (the actual run)."""
+    """Write a data-driven Markdown report (+ optional DOCX). No pre-baked conclusions:"""
     title = cfg["report"]["title"]
     ts = ctx["timestamp"]
     resistant, sensitive = ctx["resistant"], ctx["sensitive"]
@@ -2259,7 +2012,6 @@ def generate_report(out_dir, cfg, ctx, log):
     A(f"*Automated build {ts}. This report is generated from the computed results of this "
       f"run; it is a summary of analyses performed, not a peer-reviewed manuscript.*\n")
 
-    # ---- methods ----
     A("## Methods\n")
     A("Annotated proteomes were obtained for the cultivar panel "
       f"({', '.join(ctx['cultivars'])}) from Ensembl Plants "
@@ -2282,7 +2034,6 @@ def generate_report(out_dir, cfg, ctx, log):
       "tested for association with phenotype (chi-square); p-values were "
       "Benjamini-Hochberg adjusted.\n")
 
-    # ---- recruitment specificity, BEFORE any family statistic is quoted ------------
     audit = ctx.get("audit") or {}
     spec = audit.get("specificity")
     if spec is not None and len(spec):
@@ -2328,7 +2079,6 @@ def generate_report(out_dir, cfg, ctx, log):
               f">= 0.80; {s['lt_0.50']} ({100*s['lt_0.50']/s['n']:.0f}%) below 0.50. "
               f"Nodes below the threshold are collapsed in the rendered tree.\n")
 
-    # ---- results ----
     A("## Results\n")
     for fam in FAMILIES:
         fam_pts = [p for p in prot if p["family"] == fam]
@@ -2353,7 +2103,6 @@ def generate_report(out_dir, cfg, ctx, log):
             for p in sorted(novel_list, key=lambda x: -x["n_cultivars"])[:25]:
                 A(f"    - `{p['proteotype_id']}` (len {p['length']}): "
                   f"{p['cultivars'].replace(';', ', ')}\n")
-        # thermostability comparison
         gc = ctx["group_stats"]
         if resistant and sensitive and not gc.empty:
             g = gc[gc["family"] == fam].sort_values("p_value")
@@ -2380,7 +2129,6 @@ def generate_report(out_dir, cfg, ctx, log):
           "labelled in each group. Set `group: resistant|sensitive` in `config.yaml` (based on "
           "your phenotyping or cited studies) and re-run to activate this analysis.\n")
 
-    # ---- interpretation & limitations ----
     A("\n## Interpretation and limitations\n")
     A("- The physicochemical descriptors above are **sequence-derived proxies** associated with "
       "thermostability in the protein-engineering literature. They are hypotheses to prioritise "
@@ -2395,7 +2143,6 @@ def generate_report(out_dir, cfg, ctx, log):
       "- Group comparisons treat individual homolog copies as observations; with few cultivars, "
       "power is limited and results are exploratory.\n")
 
-    # ---- figures / files ----
     A("\n## Output files\n")
     for label, path in ctx["artifacts"]:
         A(f"- {label}: `{os.path.basename(path)}`\n")
@@ -2420,7 +2167,7 @@ def generate_report(out_dir, cfg, ctx, log):
     docx_path = None
     if cfg["report"].get("make_docx", True):
         try:
-            import docx  # python-docx
+            import docx
             doc = docx.Document()
             doc.add_heading(title, 0)
             for block in "".join(lines).split("\n## "):
@@ -2444,14 +2191,11 @@ def generate_report(out_dir, cfg, ctx, log):
             docx_path = os.path.join(out_dir, "REPORT.docx")
             doc.save(docx_path)
             log.info("Wrote report: %s", docx_path)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("DOCX report not created (%s). Markdown report is available.", e)
     return md_path, docx_path
 
 
-# --------------------------------------------------------------------------------------
-# Orchestration
-# --------------------------------------------------------------------------------------
 def run_pipeline(cfg, args, log):
     ts = get_timestamp()
     outputs_root = os.path.abspath(cfg["project"]["outputs_dir"])
@@ -2519,22 +2263,18 @@ def run_pipeline(cfg, args, log):
     proteotypes, member_records = dedupe_to_proteotypes(all_members, reference_cultivar=ref_cult)
     pav_df = build_pav_matrix(proteotypes, cultivars)
 
-    # Persistent cache for UniProt / InterPro / NCBI lookups (reused across runs).
     ext_cache = (cfg.get("external", {}).get("cache_dir")
                  or os.path.join(inputs_dir, "external_cache"))
     os.makedirs(ext_cache, exist_ok=True)
 
     log.info("=== [5/7] Alignment + tree per family ===")
     aln_by_family = {}
-    tree_support = {}          # family -> support distribution from tree_tools
+    tree_support = {}
     artifacts = []
     rooting_report = []
     for fam in FAMILIES:
         fam_fa = os.path.join(out_dir, f"{fam}_proteotypes.faa")
         n = write_family_fasta(proteotypes, fam, fam_fa)
-        # Append external outgroup sequences (UniProt) so the tree can be rooted on a
-        # real outgroup rather than at its midpoint, and so that a divergent in-family
-        # clade can be tested against a genuine out-of-family control (e.g. CbbX).
         if n and cfg.get("external", {}).get("fetch_outgroups", False):
             try:
                 import external_data
@@ -2547,7 +2287,7 @@ def run_pipeline(cfg, args, log):
                     log.info("  %s: %d outgroup sequence(s) appended (%s)",
                              fam, len(og_ids), ", ".join(og_ids))
                     cfg["alignment"]["root"] = "outgroup"
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.warning("outgroup fetch failed for %s (%s); tree will be "
                             "midpoint-rooted instead.", fam, e)
         if n == 0:
@@ -2565,11 +2305,6 @@ def run_pipeline(cfg, args, log):
                 artifacts.append((f"{fam} tree (Newick)", nwk))
                 novel_ids = {p["proteotype_id"] for p in proteotypes
                              if p.get("family") == fam and p.get("novel_vs_reference")}
-                # Render through tree_tools so SH-like support values are DISPLAYED,
-                # weakly supported nodes are collapsed into polytomies, and the tree is
-                # rooted. FastTree writes support into the Newick by default; the old
-                # renderer parsed it and then silently discarded it, which is why the
-                # trees could not support a clade-level claim.
                 png = os.path.join(out_dir, f"{fam}_tree_circular.png")
                 try:
                     import tree_tools
@@ -2591,9 +2326,6 @@ def run_pipeline(cfg, args, log):
                     elif mode in ("outgroup", "midpoint"):
                         troot = tree_tools.midpoint_root(troot)
                         mode = "midpoint"
-                    # Record what rooting was ACTUALLY achieved. A silent fall-back from
-                    # outgroup to midpoint contradicts any statement in the manuscript
-                    # that the tree is outgroup-rooted, so make it impossible to miss.
                     if want == "outgroup" and mode != "outgroup":
                         cfgd = cfg["alignment"].get("outgroup", {}).get(fam) or []
                         why = ("no outgroup accessions configured" if not cfgd else
@@ -2616,7 +2348,7 @@ def run_pipeline(cfg, args, log):
                         troot, png, novel_ids=novel_ids, prefix=(fam + "_"),
                         title_note=(f"Node labels: SH-like local support; nodes < {thr:g} "
                                     f"collapsed ({n_col}); {mode}-rooted"))
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     log.warning("tree_tools rendering failed (%s); using the plain renderer.", e)
                     png = plot_circular_tree(nwk, png,
                                              f"{FAM_DISP.get(fam, fam)} proteotype tree", log,
@@ -2624,7 +2356,6 @@ def run_pipeline(cfg, args, log):
                 if png:
                     artifacts.append((f"Figure: {fam} tree", png))
 
-    # --- rooting report: what was requested vs what the trees actually got -----------
     if rooting_report:
         _rr = os.path.join(out_dir, "tree_rooting.csv")
         pd.DataFrame(rooting_report).to_csv(_rr, index=False)
@@ -2675,7 +2406,6 @@ def run_pipeline(cfg, args, log):
     known_df = map_known_residues(cfg, aln_by_family, member_records, log)
 
     log.info("=== [7/7] Persistence, plots, report ===")
-    # proteotype catalog FASTA
     catalog = os.path.join(out_dir, "PanProteome_catalog.faa")
     SeqIO.write([SeqRecord(Seq(p["seq"]), id=p["proteotype_id"],
                            description=f"{p['family']} novel={p['novel_vs_reference']} "
@@ -2683,7 +2413,6 @@ def run_pipeline(cfg, args, log):
                 catalog, "fasta")
     artifacts.insert(0, ("Pan-proteome catalog (all proteotypes)", catalog))
 
-    # tables -> CSV
     proteotypes_df = pd.DataFrame([{k: v for k, v in p.items() if k != "seq"}
                                    for p in proteotypes])
     members_df = pd.DataFrame([{k: v for k, v in m.items() if k != "seq"}
@@ -2702,7 +2431,6 @@ def run_pipeline(cfg, args, log):
             df.to_csv(path, index=False)
             artifacts.append((fname.replace(".csv", "").replace("_", " ").title(), path))
 
-    # plots  (overview + novel PAV are MAIN; PAV heatmaps + circos go to supplementary)
     ov = plot_overview(proteotypes, pav_df, cultivars,
                        os.path.join(out_dir, "Figure_overview.png"), log)
     if ov:
@@ -2729,7 +2457,6 @@ def run_pipeline(cfg, args, log):
             if p4:
                 artifacts.append((f"Figure: {fam} descriptors by group", p4))
 
-    # SQLite
     db_path = os.path.join(out_dir, "wheat_pan_proteome.db")
     run_meta = pd.DataFrame([{"timestamp": ts, "release": release_dir,
                               "n_cultivars": len(cultivars),
@@ -2747,7 +2474,6 @@ def run_pipeline(cfg, args, log):
         pd.concat(hits_frames, ignore_index=True).to_csv(allhits, index=False)
         artifacts.append(("All DIAMOND hits", allhits))
 
-    # proteotype naming (UniProt + cultivar + our nomenclature) + annotated FASTA
     try:
         naming_csv = os.path.join(out_dir, "proteotype_naming.csv")
         naming_df = build_proteotype_naming(out_dir, naming_csv)
@@ -2770,28 +2496,22 @@ def run_pipeline(cfg, args, log):
                 for i in range(0, len(seq), 60):
                     fo.write(seq[i:i + 60] + "\n")
         artifacts.append(("Annotated proteotype FASTA (composite ids)", ann))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("proteotype naming / annotated FASTA failed: %s", e)
 
-    # copy detailed tables to the supplementary directory
     for _f in ("members.csv", "diamond_hits_all.csv", "physicochemical_features.csv",
                "polymorphic_sites.csv"):
         _src = os.path.join(out_dir, _f)
         if os.path.exists(_src):
             shutil.copy(_src, os.path.join(supp_dir, _f))
 
-    # whole-proteome (entire Chinese Spring reference) pan-genome + genome-wide figures
     try:
         gw_res = run_whole_proteome_reference(proteomes, ref_cult, out_dir, supp_dir, diamond, cfg, log)
         for _label, _path in gw_res.get("artifacts", []):
             artifacts.append((_label, _path))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("whole-proteome analysis failed: %s", e)
 
-    # ---- gene-level, specificity, divergence and granularity audit -----------------
-    # These are the quantities that make the family counts interpretable: protein models
-    # are transcript isoforms, "reference-absent" is an exact-identity call, and the
-    # accessory fraction depends entirely on clustering granularity.
     audit_out = {}
     try:
         import panproteome_audit
@@ -2811,13 +2531,9 @@ def run_pipeline(cfg, args, log):
             p = os.path.join(audit_dir, fn)
             if os.path.exists(p):
                 artifacts.append((label, p))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("post-hoc audit failed: %s", e)
 
-    # ---- external annotation (UniProt protein name / Pfam / InterPro / location) ----
-    # Confirms directly, from the primary databases, what each proteotype's closest
-    # characterised homologue actually is - the evidence a "is this really family X?"
-    # question needs.
     try:
         if cfg.get("external", {}).get("annotate_proteotypes", False):
             import external_data
@@ -2829,7 +2545,7 @@ def run_pipeline(cfg, args, log):
                 shutil.copy(p, os.path.join(supp_dir, "proteotype_annotation.csv"))
                 artifacts.append(("UniProt/InterPro annotation of proteotypes", p))
                 audit_out["annotation"] = ann
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("external annotation failed: %s", e)
 
     ctx = {"timestamp": ts, "release": release_dir, "base_url": base_url,
@@ -2840,17 +2556,15 @@ def run_pipeline(cfg, args, log):
            "pos_assoc": pos_assoc, "artifacts": artifacts}
     generate_report(out_dir, cfg, ctx, log)
 
-    # ---- data bundle: figures, tables, supplementary, RESULTS_NUMBERS.json ---------
     if cfg.get("final_outputs", {}).get("enabled", True):
         try:
             import build_tables
             final_dir = os.path.join(out_dir, cfg["final_outputs"].get("dirname", "final"))
             build_tables.build(out_dir, final_dir, cfg, log)
             artifacts.append(("Final publication bundle", final_dir))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("final bundle failed: %s", e)
 
-    # concise console summary
     print("\n" + "=" * 70)
     print(" PAN-PROTEOME BUILD COMPLETE")
     print("=" * 70)
@@ -2865,9 +2579,6 @@ def run_pipeline(cfg, args, log):
     return out_dir
 
 
-# --------------------------------------------------------------------------------------
-# Self-test (offline: exercises pure logic without network/external tools/Biopython)
-# --------------------------------------------------------------------------------------
 def selftest(log):
     ok = True
 
@@ -2876,7 +2587,6 @@ def selftest(log):
         ok = ok and bool(cond)
         print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
-    # amino-acid metrics
     poly_a = "A" * 100
     check("aliphatic_index(poly-Ala)==100", abs(aliphatic_index(poly_a) - 100.0) < 1e-6)
     check("gravy(poly-Ala)==1.8", abs(gravy(poly_a) - 1.8) < 1e-6)
@@ -2888,7 +2598,6 @@ def selftest(log):
     check("features has aliphatic_index", "aliphatic_index" in feats)
     check("features length_std_aa < length", feats["length_std_aa"] <= feats["length"])
 
-    # dedupe + PAV
     members = [
         {"cultivar": "chinese_spring", "family": "RCA", "source_id": "cs1",
          "pident_to_ref": 100, "evalue_to_ref": 0.0, "length": 5, "seq": "MSTAA"},
@@ -2907,16 +2616,13 @@ def selftest(log):
     pav = build_pav_matrix(pts, ["chinese_spring", "jagger", "mace"])
     check("PAV matrix shape", pav.shape[0] == len(pts) and "mace" in pav.columns)
 
-    # polymorphic sites
     aln = {"a": "MSTAA", "b": "MSTAA", "c": "MSTAV"}
     poly = polymorphic_sites(aln, "RCA")
     check("one polymorphic column at pos 5", len(poly) == 1 and int(poly.iloc[0]["aln_column"]) == 5)
 
-    # BH
     q = benjamini_hochberg([0.01, 0.02, 0.03, 0.9])
     check("BH monotone & <=1", (q <= 1).all() and q[-1] >= q[0])
 
-    # group comparison (needs scipy)
     if _HAVE_SCIPY:
         mf = pd.DataFrame([
             {"cultivar": "r1", "family": "RCA", "aliphatic_index": 90, "gravy": 0.1,
@@ -2959,9 +2665,6 @@ def check_env(cfg, log):
     return 0
 
 
-# --------------------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------------------
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(
@@ -2996,7 +2699,7 @@ def main(argv=None):
     try:
         run_pipeline(cfg, args, log)
         return 0
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("Pipeline failed: %s", e)
         return 1
 

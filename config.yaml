@@ -1,137 +1,57 @@
-# =====================================================================================
-# config.yaml  --  Wheat RCA / Cpn60 extended pan-proteome pipeline
-# Everything the pipeline needs is here. Edit this file, not the Python code.
-# =====================================================================================
 
 project:
   name: wheat_rca_cpn60_panproteome
-  # Persistent cache for downloaded proteomes/references. Put this on /group or $HOME on
-  # Setonix scratch (NOT node-local scratch, which is wiped). Reused across jobs.
-  # RELATIVE on purpose: they resolve against the directory you launch from, so a copy
-  # of this bundle in a new folder writes into that folder. Absolute paths here caused a
-  # run launched from FINAL/ to write into the parent project's outputs/ instead.
   inputs_dir: inputs
-  # Timestamped result folders (pan_proteome_build_YYYYMMDD_HHMMSS/) are written here.
   outputs_dir: outputs
 
 network:
-  # Setonix compute nodes have no outbound internet: run setup_env.sh on a login node.
-  # otherwise (and use stage_data.sh on a login node if compute nodes have no internet).
   http_proxy: ""
   https_proxy: ""
   retries: 4
   retry_delay_seconds: 5
 
 ensembl:
-  # "current" auto-resolves the newest Ensembl Plants release; or pin a number, e.g. 58,
-  # for full reproducibility.
   release: "current"
-  # Ensembl Genomes data is served from EBI, which has a valid TLS certificate.
-  # (The old ftp.ensemblgenomes.org host currently serves a mismatched certificate.)
   division_ftp: "https://ftp.ebi.ac.uk/ensemblgenomes/pub/plants"
-  # Tried in order if the primary host is down or has a bad cert. The http entries
-  # sidestep the broken ftp.ensemblgenomes.org certificate without disabling TLS globally.
   division_ftp_fallbacks:
     - "http://ftp.ebi.ac.uk/ensemblgenomes/pub/plants"
     - "http://ftp.ensemblgenomes.org/pub/plants"
     - "https://ftp.ensemblgenomes.org/pub/plants"
 
 references:
-  # Reference query sequences for the DIAMOND homology search. By default they are fetched
-  # from UniProt. For reproducibility you may instead point `fasta:` at a local file
-  # (that overrides the UniProt query).
   uniprot_rest: "https://rest.uniprot.org/uniprotkb/stream"
   max_per_family: 200
   RCA:
     uniprot_query: '(taxonomy_id:4565) AND (protein_name:"rubisco activase" OR protein_name:"ribulose bisphosphate carboxylase/oxygenase activase" OR gene:rca)'
     fasta: ""
   CPN60:
-    # WIDENED. The previous query returned only TWO sequences (P08823, A0A2I4JD18).
-    # Two queries at 40% identity against a 130k-protein proteome recruit the whole
-    # group I chaperonin superfamily, mitochondrial CPN60 included, and every family
-    # statistic downstream becomes uninterpretable. Check the reference count in the
-    # log: the run warns if it falls below min_references.
     uniprot_query: '(taxonomy_id:4565) AND (protein_name:"chaperonin 60" OR protein_name:"60 kDa chaperonin" OR protein_name:"chaperonin-60" OR protein_name:"RuBisCO subunit binding-protein" OR protein_name:"RuBisCO large subunit-binding protein" OR protein_name:"Chaperonin CPN60" OR gene:cpn60 OR gene:cpn60a OR gene:cpn60b OR gene:hsp60)'
     fasta: ""
     min_references: 6
 
-# -------------------------------------------------------------------------------------
-# Whole-proteome (entire Chinese Spring reference) pan-genome analysis.
-#   In ADDITION to the focused RCA/Cpn60 pan-proteome, every protein of every cultivar is
-#   mapped (DIAMOND) against the ENTIRE Chinese Spring reference proteome. Proteins with
-#   no acceptable match are 'novel' and are clustered among themselves; the resulting
-#   presence/absence table is partitioned into core / soft-core / shell / cloud.
-#
-#   Outputs: supplementary/genome_wide_pav.csv, supplementary/pangenome_partition.csv,
-#   Figure_pangenome_overview.png (main) + genome-wide supplementary figures.
-#
-#   This is the most expensive stage of the pipeline. Set enabled: false to skip it.
 whole_proteome:
   enabled: true
 
-  # RESUME. The heavy per-cultivar searches are cached in work_dir and reused, so a
-  # re-run (or a job that hit the wall clock) picks up where it left off instead of
-  # repeating hours of DIAMOND. Set false to force everything to be recomputed.
   resume: true
-  # Persistent scratch for this stage. Empty -> <project.inputs_dir>/whole_proteome_work.
-  # It must NOT be inside the timestamped results folder, or nothing could ever be reused.
   work_dir: ""
 
-  # Ensembl proteomes contain every transcript isoform (Chinese Spring: ~133k proteins
-  # for ~107k genes). Collapsing to the longest protein per gene makes the pan-genome
-  # gene-level (the usual convention) and removes the isoform redundancy that otherwise
-  # makes the novel-vs-novel clustering explode in time and memory.
   collapse_isoforms: true
 
-  # Thresholds for a cultivar protein to "match" a Chinese Spring protein.
   min_identity: 40          # % identity
   min_coverage: 60          # % query coverage
   evalue: 1.0e-5
 
-  # Clustering of the reference-absent ("novel") proteins into novel proteotypes.
-  # Exact duplicates are merged by sequence hash first, then DIAMOND's built-in
-  # cascaded clustering ('diamond cluster', DIAMOND >= 2.1) groups the remainder.
-  # If this DIAMOND has no cluster workflow, the pipeline falls back automatically to a
-  # blastp self-alignment + union-find.
   cluster_novel: true
   cluster_approx_id: 90     # approximate identity for the cluster workflow
   cluster_member_cover: 80  # % of the member covered by the centroid
 
-  # ---- performance / memory -----------------------------------------------------------
-  # sensitivity: "" uses DIAMOND's (fast) default. "--more-sensitive" is appropriate for
-  #   the small RCA/Cpn60 search but is orders of magnitude slower across whole proteomes,
-  #   so it is deliberately NOT inherited from homology.diamond_sensitivity here.
   sensitivity: ""
-  # DIAMOND memory is roughly 6 x block_size GB, so 2.0 -> ~12 GB. Raise for speed only if
-  # the job has the memory; lower if you are hitting the OOM killer (rc=-9).
   block_size_gb: 2.0
   index_chunks: 4
-  # Ceiling passed to `diamond cluster`. Keep it comfortably BELOW the SLURM --mem request.
   memory_limit_gb: 48
-  # Neighbours kept per query in the blastp clustering fallback. Must be > 1: with 1 every
-  # protein only ever hits itself and nothing can cluster.
   fallback_max_target_seqs: 25
-  # Write an annotated FASTA of the ENTIRE extended proteome: one representative
-  # sequence per genome-wide proteotype cluster (Chinese Spring protein for
-  # reference-anchored clusters; the representative novel protein otherwise), headed
-  # with a composite id <cluster>__<cultivar>__<CSref|novel> plus prevalence/novelty.
-  # Output: <result>/WholeProteome_catalog.annotated.faa
   write_catalog: true
 
-# -------------------------------------------------------------------------------------
-# Cultivar panel.
-#   ensembl_strain : the Ensembl Plants strain directory (see README for how to confirm
-#                    the exact names on your chosen release). Alternatively set
-#                    proteome_path: /path/to/your.pep.fa[.gz] to use a local proteome.
-#   group          : heat phenotype -> resistant | sensitive | unknown
-#
-#   >>> IMPORTANT <<<  The resistant/sensitive labels below are ALL 'unknown' on purpose.
-#   Heat tolerance is genotype- and environment-specific; only you can assign it validly
-#   from your phenotyping or from studies you cite. Set at least 2 cultivars to
-#   'resistant' and 2 to 'sensitive' to activate the comparative analysis. Until then the
-#   pipeline still builds the pan-proteome and all descriptors; it just skips the
-#   group comparison.
-# -------------------------------------------------------------------------------------
 cultivars:
   chinese_spring:            # reference / novelty baseline (keep this one)
     ensembl_strain: triticum_aestivum
@@ -163,15 +83,6 @@ cultivars:
   mattis:                    # SY Mattis
     ensembl_strain: triticum_aestivum_mattis
     group: unknown
-  # ---- More cultivars available on Ensembl Plants; uncomment/confirm strain names ----
-  # spelta:  {ensembl_strain: triticum_aestivum_spelta,  group: unknown}   # spelt
-  # cadenza: {ensembl_strain: triticum_aestivum_cadenza, group: unknown}
-  # paragon: {ensembl_strain: triticum_aestivum_paragon, group: unknown}
-  # robigus: {ensembl_strain: triticum_aestivum_robigus, group: unknown}
-  # claire:  {ensembl_strain: triticum_aestivum_claire,  group: unknown}
-  # weebil:  {ensembl_strain: triticum_aestivum_weebil,  group: unknown}   # Weebill1
-  # kariega: {ensembl_strain: triticum_aestivum_kariega, group: unknown}
-  # renan:   {ensembl_strain: triticum_aestivum_renan,   group: unknown}
 
 homology:
   min_identity: 40.0          # percent identity of a proteome protein to a reference
@@ -183,34 +94,13 @@ homology:
 
 alignment:
   mafft_args: "--auto --maxiterate 1000"
-  # ---- tree post-processing (tree_tools.py) ------------------------------------------
-  # FastTree writes Shimodaira-Hasegawa-like local support into the Newick by default.
-  # Nodes below this threshold are collapsed into polytomies so that unresolved structure
-  # is not drawn as if it were resolved.
   collapse_support_below: 0.8
-  # "outgroup" roots on the sequences fetched by external.outgroups (recommended);
-  # falls back to "midpoint" automatically if none could be fetched. "none" leaves the
-  # tree unrooted.
   root: outgroup
-  # Filled automatically when outgroup sequences are appended. Set by hand only if you
-  # add outgroups to the alignment yourself.
   outgroup:
     RCA: []
     CPN60: []
   add_outgroup_sequences: true
 
-# -------------------------------------------------------------------------------------
-# External database enrichment (UniProtKB / InterPro / NCBI E-utilities).
-#   annotate_proteotypes : gives every proteotype the protein name, gene name, Pfam and
-#     InterPro domain complement and subcellular location of its closest characterised
-#     homologue -> proteotype_annotation.csv. This is the evidence a family-identity
-#     claim has to be argued from ("is this clade really RCA, or CbbX?").
-#   fetch_outgroups      : downloads outgroup sequences and appends them to each family
-#     FASTA before alignment, so the tree can be rooted on a real outgroup. You cannot
-#     root on a taxon that is not in the tree.
-#   All lookups are cached on disk; warm the cache on a login node with
-#     python external_data.py --warm-cache --config config.yaml
-# -------------------------------------------------------------------------------------
 external:
   enabled: true
   annotate_proteotypes: true
@@ -220,45 +110,34 @@ external:
   ncbi_email: ""            # NCBI asks for an identifying email
   ncbi_api_key: ""
   outgroups:
-    # RCA: rice and Arabidopsis activase to root the tree; CbbX is an out-of-family
-    # AAA+ ATPase included deliberately as a negative control, so a divergent in-family
-    # clade can be tested against a genuine non-RCA sequence rather than asserted.
     RCA: ["Q40071", "P10896", "Q9SB58"]
-    # Cpn60: E. coli GroEL, the canonical group I chaperonin outgroup.
     CPN60: ["P0A6F5"]
 
-# -------------------------------------------------------------------------------------
-# Publication bundle. Writes <result>/final/ with manuscript draft, main figures and
-# tables, supplementary figures/tables/data and a MANIFEST. Every number in the draft is
-# read from this run's own output tables, so the text can never drift from the data.
-# -------------------------------------------------------------------------------------
 final_outputs:
   enabled: true
   dirname: final
   build_manuscript: true
 
 thermostability:
-  # OPTIONAL. Literature residue positions to overlay on the alignment for inspection.
-  # LEAVE EMPTY unless you can cite a specific reference AND its coordinate system.
-  # Coordinate systems differ across papers, isoforms and species, so an unverified
-  # position is worse than none. `ref` must match a proteotype id present after alignment,
-  # or a reference header; `pos` is 1-based in that sequence.
   RCA_residues: []
-  #   - {ref: RCA_PT001, pos: 314, note: "EXAMPLE ONLY - verify against your citation"}
   CPN60_residues: []
 
 report:
   title: "A pan-proteome catalogue of bread wheat: Rubisco activase and chaperonin-60 as resources for dissecting the genetic basis of photosynthetic thermotolerance"
   make_docx: true
-  # Radial ("circos") presence-absence plots are withdrawn: they carry no genomic
-  # coordinates, so they cannot show where a proteotype sits in the genome. The gene
-  # locus table (audit/cs_locus_table.csv, manuscript Table 6) replaces them.
   draw_circos: false
-  # OPTIONAL OVERRIDE - leave empty. This is NOT the heat phenotype; see cultivars below.
-  # It selects which proteotypes are featured in the main-text candidate table (Table 5)
-  # and tested for monophyly against the tree. The pipeline now DETECTS this from the
-  # data: within a family it counts gene loci per homoeologous group, and a complete
-  # homoeologous set on a minority group (e.g. the group-2 RCA-like lineage, against the
-  # canonical TaRca1/TaRca2 pair on group 4) is flagged automatically and written to
-  # audit/divergent_clade.csv. Fill this in only to override that choice.
   candidate_clade: []
+
+rca_isoforms:
+  anchors:
+    TaRca1: {A: TraesCS4A02G177600, B: TraesCS4B02G140200, D: TraesCS4D02G134900}
+    TaRca2: {A: TraesCS4A02G177500, B: TraesCS4B02G140300, D: TraesCS4D02G135000}
+  cte_min_residues: 10            # CTE residues needed to call a TaRca2 proteotype RCA2alpha
+  full_length_min_coverage: 0.97  # coverage of the canonical form needed for "full-length"
+  heat_responsive_elements:
+    TaRca1-A: reported
+    TaRca1-B: reported
+    TaRca1-D: reported
+    TaRca2-A: reported
+    TaRca2-B: not detected
+    TaRca2-D: not detected

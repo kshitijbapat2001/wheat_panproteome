@@ -1,37 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-transcript_crossref.py - test our proteotypes against an independent, RNA-seq-based
-annotation of the same ten assemblies.
-
-Why
----
-Our proteotypes come from the Ensembl gene models, so "is this gene in the Ensembl
-annotation?" is circular and cannot tell a real splice isoform from a fragmented
-prediction. White et al. (2025, Nat Commun 16:8538) built de novo, RNA-seq-based
-annotations and orthogroups for the same nine cultivars plus Chinese Spring, and
-released them at Zenodo 10.5281/zenodo.16964999. Because that annotation is
-independent of the one we used, agreement with it is genuine corroboration.
-
-Two questions are answered per proteotype:
-
-  RECOVERY  Is the parent gene locus present in the independent de novo orthogroup
-            set? A reference-absent proteotype whose locus is recovered
-            independently is far more likely to be a real haplotype than a
-            gene-model artefact.
-  BREADTH   Does White et al. call that orthogroup core, shell or cloud? Their
-            classification is derived from RNA-seq evidence rather than from
-            protein-sequence clustering, so it is a second opinion on prevalence.
-
-Optionally, with --expression, the per-cultivar DESeq2 count tables are downloaded
-(273 MB) and each locus is reported as expressed or not.
-
-Files are cached, so a second run costs nothing. Downloads need internet: run this
-on a login node, not a compute node.
-
-    python transcript_crossref.py --inputs outputs/latest --outdir outputs/latest/transcripts
-    python transcript_crossref.py --inputs outputs/latest --expression      # + 273 MB
-"""
+"""transcript_crossref.py - test our proteotypes against an independent, RNA-seq-based"""
 from __future__ import annotations
 
 import argparse
@@ -44,11 +13,10 @@ import urllib.request
 
 import pandas as pd
 
-ZENODO_RECORD = "16964999"          # White et al. 2025 additional data
+ZENODO_RECORD = "16964999"
 ZENODO_API = "https://zenodo.org/api/records/{rec}"
 UA = {"User-Agent": "wheat-panproteome/3.1"}
 
-# Small/medium tables that carry the orthogroup and core-shell-cloud calls.
 CORE_FILES = ["W10_Orthogroups.full.tsv", "W10_coreshellcloud.summary.csv",
               "W10_core.csv", "W10_shell.csv", "W10_cloud.csv"]
 EXPR_FILES = ["deseq2_expression_counts_cv_aligned_to_cv.xlsx"]
@@ -102,7 +70,7 @@ def genes_in_file(path, log=print, max_rows=None):
                     found.update(x.split(".")[0] for x in lst)
             if max_rows and len(found) > max_rows:
                 break
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log(f"    WARNING could not parse {os.path.basename(path)}: {e}")
     return found
 
@@ -126,9 +94,6 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
 
     wanted = list(CORE_FILES) + (EXPR_FILES if expression else [])
 
-    # Offline path: if every wanted file is already in the cache, never touch the network.
-    # Compute nodes have no internet, so the Zenodo API call would abort an otherwise
-    # perfectly runnable step.
     cached = {n: os.path.join(cache, n) for n in wanted
               if os.path.exists(os.path.join(cache, n))
               and os.path.getsize(os.path.join(cache, n)) > 0}
@@ -138,7 +103,7 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
     else:
         try:
             avail = zenodo_files(record, log)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if cached:
                 log(f"[transcripts] Zenodo unreachable ({e}); using {len(cached)} cached file(s)")
                 avail = {}
@@ -157,12 +122,11 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
             log(f"    {name} ({size/1e6:.1f} MB)")
             try:
                 got.append(fetch(url, os.path.join(cache, name), log))
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log(f"    WARNING download failed for {name}: {e}")
     if not got:
         raise SystemExit("[transcripts] nothing downloaded; cannot cross-reference")
 
-    # ---- which of our loci are recovered independently ------------------------------
     denovo = set()
     per_file = {}
     for p in got:
@@ -181,17 +145,12 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
             "comparison against their predicted proteins would be required instead.")
         return pd.DataFrame()
 
-    # A presence test against these tables is close to vacuous: they enumerate almost
-    # the whole Ensembl gene space, so "is our gene mentioned?" is true by construction.
-    # Report the coverage so the reader can see that, then move to the test that can
-    # actually fail: does their INDEPENDENT prevalence call agree with ours?
     coverage = len(denovo)
     log(f"[transcripts] NOTE the downloaded tables enumerate {coverage:,} gene ids, "
         f"which is close to the entire annotated gene space. A presence/absence test "
         f"against them cannot fail and is reported for completeness only; the "
         f"informative comparison is the prevalence-class agreement below.")
 
-    # ---- per-locus and per-proteotype verdicts --------------------------------------
     mem["recovered_in_denovo"] = mem["gene"].isin(denovo)
     locus = (mem.groupby(["family", "cultivar", "gene"])["recovered_in_denovo"]
              .max().reset_index())
@@ -232,7 +191,6 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
         log("\n    (Recovery is near-universal because the reference tables enumerate "
             "almost the whole gene space; treat it as a sanity check, not as evidence.)")
 
-    # ---- the test that can fail: their core/shell/cloud call vs ours ----------------
     prev_map = {}
     for lab, fn in (("core", "W10_core.csv"), ("shell", "W10_shell.csv"),
                     ("cloud", "W10_cloud.csv")):
@@ -241,11 +199,6 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
             for g in genes_in_file(fp, log):
                 prev_map.setdefault(g, lab)
     if prev_map:
-        # The comparison must be made at the PROTEOTYPE level. Gene identifiers are
-        # assembly-specific (TraesARI... exists only in ArinaLrFor), so counting
-        # cultivars per gene always returns 1 and would classify everything as cloud.
-        # A proteotype, by construction, spans the cultivars that share that exact
-        # sequence, which is the quantity comparable to their orthogroup call.
         mem["denovo_prevalence"] = mem["gene"].map(prev_map)
         n_cult = mem["cultivar"].nunique()
 
@@ -254,7 +207,6 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
 
         ours = (mem.groupby("proteotype_id")["cultivar"].nunique().map(_cls)
                 .rename("our_prevalence"))
-        # a proteotype inherits the modal de novo call of its constituent loci
         theirs = (mem.dropna(subset=["denovo_prevalence"])
                   .groupby("proteotype_id")["denovo_prevalence"]
                   .agg(lambda x: x.mode().iloc[0] if len(x.mode()) else None)
@@ -274,12 +226,6 @@ def run(inputs, outdir, cache=None, expression=False, record=ZENODO_RECORD, log=
                 log("      " + line)
             n_priv_core = int(((cmp["our_prevalence"] == "cloud") &
                                (cmp["denovo_prevalence"] == "core")).sum())
-            # The two classifications count different things and are EXPECTED to differ.
-            # Ours asks how many cultivars share an exact amino-acid sequence; theirs asks
-            # how many carry any gene in the orthogroup. A locus present in every cultivar
-            # but carrying a different allele in each is core by their measure and
-            # cultivar-private by ours, and both calls are right. Separate the two
-            # explanations by asking whether our own data place that locus in every cultivar.
             allelic, gaps = 0, 0
             for pid in cmp.index[(cmp["our_prevalence"] == "cloud") &
                                  (cmp["denovo_prevalence"] == "core")]:

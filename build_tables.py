@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build the data artefacts for the manuscript: tables, figures and
-RESULTS_NUMBERS.json. Deliberately writes NO manuscript prose.
-
-
-build_tables.py - assemble the data bundle (tables, figures, numbers) from a build.
-
-Creates <result>/final/ containing everything a submission needs, with the
-numbers written straight out of the pipeline's own tables so the text can never
-drift from the data:
-
-    final/
-      manuscript/   Manuscript_draft.md, Manuscript_draft.docx, RESULTS_NUMBERS.json
-      figures/      Figure1..Figure7 (main text, renamed and ordered by citation)
-      tables/       Table1..Table6 as .csv and a combined .docx
-      supplementary/
-        figures/    Supplementary Figure S1..S4
-        tables/     Supplementary Table S1..S11
-        data/       FASTA catalogues, Newick trees, SQLite database
-      MANIFEST.md   what every file is, and which comment it answers
-
-The draft is generated, not transcribed. Every count, percentage, confidence
-interval and support value is read from the CSVs produced by the run, so
-re-running with different data yields a correct draft rather than a stale one.
-Passages needing an author decision are marked >>> ACTION <<<.
-
-Usage
------
-    python build_tables.py --inputs pan_proteome_build_XXXX
-    python build_tables.py --inputs <dir> --outdir <dir>/final
-"""
+"""Build the data artefacts for the manuscript: tables, figures and"""
 from __future__ import annotations
 
 import argparse
@@ -39,15 +10,7 @@ import shutil
 
 
 def _copy(src, dst):
-    """Copy that survives a re-run.
-
-    Two things break a naive shutil.copy here. The source can resolve to the destination
-    itself once a previous run has populated the bundle (SameFileError), and shutil.copy
-    preserves the source mode, so a read-only input yields a read-only output that the
-    next run cannot overwrite (PermissionError). Handle both.
-    """
-    # realpath, not abspath: outputs/latest is a symlink to the build directory, so the
-    # same file can be reached by two different-looking paths and abspath will not tell.
+    """Copy that survives a re-run."""
     if os.path.realpath(src) == os.path.realpath(dst):
         return dst
     if os.path.exists(dst):
@@ -67,12 +30,14 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numbering
+
 CULT = {"chinese_spring": "Chinese Spring", "arinalrfor": "ArinaLrFor", "jagger": "Jagger",
         "julius": "Julius", "lancer": "Lancer", "landmark": "Landmark", "mace": "Mace",
         "norin61": "Norin61", "stanley": "CDC Stanley", "mattis": "SY Mattis"}
 FAM_DISP = {"RCA": "RCA", "CPN60": "Cpn60"}
 
-# main-text figures, in order of first citation in the text
 FIGURE_MAP = [
     ("Figure1_overview.png", "Figure_overview.png",
      "Overview of the RCA and Cpn60 pan-proteome across the cultivar panel"),
@@ -88,25 +53,7 @@ FIGURE_MAP = [
      "Genome-wide pan-proteome anchored on the reference"),
 ]
 
-SUPP_TABLES = [
-    ("proteotypes.csv", "Non-redundant proteotype catalogue"),
-    ("members.csv", "Every protein model with cultivar, gene locus, chromosome and proteotype"),
-    ("pav_matrix.csv", "Proteotype x cultivar presence-absence matrix"),
-    ("proteotype_naming.csv", "Composite identifiers and closest UniProt entry"),
-    ("physicochemical_features.csv", "Per-proteotype thermal-stability descriptors"),
-    ("polymorphic_sites.csv", "Per-alignment-column residue counts, entropy and gap fraction"),
-    ("genome_wide_pav.csv", "Genome-wide proteotype-cluster presence-absence table"),
-    ("pangenome_partition.csv", "Core/soft-core/shell/cloud partition of genome-wide clusters"),
-    ("group_comparison.csv", "Phenotype-stratified test output"),
-    ("diamond_hits_all.csv", "All DIAMOND hits with per-hit identity and coverage"),
-    ("audit/novel_divergence.csv",
-     "Divergence of every reference-absent proteotype from its nearest reference sequence"),
-    ("audit/cpn60_classes.csv",
-     "Chaperonin class assigned to every Cpn60 proteotype, with the reference it matched"),
-    ("proteotype_annotation.csv",
-     "UniProtKB and InterPro annotation of every proteotype: protein name, gene name, "
-     "Pfam and InterPro domains, subcellular location"),
-]
+SUPP_TABLES = [(src, title) for _key, src, title in numbering.SUPP_TABLES]
 
 SUPP_DATA = [
     ("PanProteome_catalog.annotated.faa", "Proteotype sequences with composite identifiers"),
@@ -123,9 +70,8 @@ SUPP_DATA = [
 ]
 
 
-# --------------------------------------------------------------------------------------
-EXTRA_SEARCH = []          # populated from cfg by build(): project inputs dir etc.
-EXCLUDE_DIRS = []          # populated by build(): the bundle we are writing
+EXTRA_SEARCH = []
+EXCLUDE_DIRS = []
 
 
 def _find(root, name):
@@ -140,30 +86,18 @@ def _find(root, name):
               os.path.join(root, "inputs", "references", name)]):
         if os.path.exists(c):
             return c
-    # Recursive fallback. Files such as reference_query_sets.csv are written outside the
-    # timestamped build directory, and when the explicit list missed them a table silently
-    # came out blank instead of failing. Search widely, take the newest match.
     import glob as _glob
     roots = [root, os.path.join(root, "..", "..")] + list(EXTRA_SEARCH)
     hits = []
     for r in roots:
         if r and os.path.isdir(r):
             hits += _glob.glob(os.path.join(r, "**", name), recursive=True)
-    # Never return a file that lives inside the bundle this run is writing: on a re-run
-    # that is a copy the previous run made, and copying it onto itself raises
-    # SameFileError. Sources must come from the build, not from the output.
-    # Collapse paths that resolve to the same file (outputs/latest is a symlink to the
-    # build directory, so every artefact is reachable twice).
     seen, uniq = set(), []
     for p in hits:
         rp = os.path.realpath(p)
         if rp not in seen:
             seen.add(rp); uniq.append(p)
     hits = uniq
-    # Prefer a source OUTSIDE the bundle we are writing, because copying a file onto
-    # itself fails. But do not hide it entirely: for some inputs the copy inside the
-    # bundle is the only one left, and a blank table is worse than a self-copy that
-    # _copy() already handles.
     if EXCLUDE_DIRS and hits:
         ex = [os.path.realpath(d) for d in EXCLUDE_DIRS]
         inside = lambda p: any(os.path.realpath(p).startswith(e + os.sep) for e in ex)
@@ -179,7 +113,7 @@ def _read(root, name):
     if p and p.lower().endswith(".csv"):
         try:
             return pd.read_csv(p)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
     return None
 
@@ -189,7 +123,7 @@ def _fmt(x, nd=1):
         if x is None or (isinstance(x, float) and np.isnan(x)):
             return "n/a"
         return f"{float(x):.{nd}f}"
-    except Exception:  # noqa: BLE001
+    except Exception:
         return str(x)
 
 
@@ -268,7 +202,7 @@ def collect_numbers(root, cfg_hint=None) -> dict:
             N["genome_wide"] = {"total": int(tot),
                                 **{k: int(v) for k, v in d.items()},
                                 "core_pct": round(100 * d.get("core", 0) / max(1, tot))}
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     if phys is not None:
         N["descriptors"] = {}
@@ -293,8 +227,26 @@ def collect_numbers(root, cfg_hint=None) -> dict:
     if cand is not None:
         N["n_candidates"] = int(len(cand))
 
+    iso = _read(root, "rca_isoform_assignment.csv")
+    isum = _read(root, "rca_isoform_summary.csv")
+    if iso is not None and len(iso):
+        full = iso["model_status"].astype(str).eq("full-length")
+        N["rca_isoforms"] = {
+            "n": int(len(iso)),
+            "by_isoform": iso["isoform"].value_counts().to_dict(),
+            "full_length": int(full.sum()),
+            "variant_models": int((~full).sum()),
+            "full_length_substitutions": {
+                r.proteotype_id: r.substitution_list for r in iso[full].itertuples()
+                if str(r.isoform) != "RCA-like" and str(r.substitution_list) not in ("", "nan")},
+            "switch_site_residues": iso.groupby("isoform")["switch_site_M159I"]
+                                       .agg(lambda x: "".join(sorted(set(map(str, x))))).to_dict(),
+        }
+        if isum is not None:
+            N["rca_isoforms"]["cultivars_with_full_length"] = dict(
+                zip(isum["established_isoform"], isum["cultivars_with_full_length_form"]))
 
-    # HMM domain profiling (domain_profiling.py)
+
     dc = _read(root, "domain_classification.csv")
     if dc is None or not len(dc):
         print("[final] WARNING: domain_classification.csv not found -> RESULTS_NUMBERS.json "
@@ -309,7 +261,6 @@ def collect_numbers(root, cfg_hint=None) -> dict:
             "pf21228": int(dc["has_PF21228"].sum()) if "has_PF21228" in dc else None,
             "pf00118": int(dc["has_PF00118"].sum()) if "has_PF00118" in dc else None,
         }
-    # independent transcript recovery (transcript_crossref.py)
     tr = _read(root, "proteotype_recovery.csv")
     if tr is None or not len(tr):
         print("[final] WARNING: proteotype_recovery.csv not found -> RESULTS_NUMBERS.json "
@@ -333,7 +284,6 @@ def collect_numbers(root, cfg_hint=None) -> dict:
         N["cultivar_order"] = _cs + _rest
         N["cultivar_names"] = [CULT.get(c, c) for c in N["cultivar_order"]]
 
-    # tree support, read from the Newick files themselves
     N["tree_support"] = {}
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -348,13 +298,10 @@ def collect_numbers(root, cfg_hint=None) -> dict:
                 s["pct_ge_080"] = round(100 * s["ge_0.80"] / s["n"], 1)
                 s["pct_lt_050"] = round(100 * s["lt_0.50"] / s["n"], 1)
                 N["tree_support"][fam] = s
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
-    # monophyly / support of a named clade (report.candidate_clade), which is what a
-    # "is this a real lineage?" question actually asks for
     clade = list((cfg_hint or {}).get("report", {}).get("candidate_clade") or [])
-    # Prefer the clade the audit detected from gene loci; config is only an override.
     _ci = _read(root, "divergent_clade.csv")
     if _ci is not None and len(_ci):
         r = _ci.iloc[0].to_dict()
@@ -385,17 +332,16 @@ def collect_numbers(root, cfg_hint=None) -> dict:
                                    "support": (float(sup) if sup is not None else None),
                                    "extra_tips": sorted(extra)}
                 break
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return N
 
 
-# --------------------------------------------------------------------------------------
 def tables_to_docx(tables, docx_path):
     try:
         import docx
         from docx.shared import Pt
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     doc = docx.Document()
     doc.styles["Normal"].font.name = "Times New Roman"
@@ -420,7 +366,6 @@ def tables_to_docx(tables, docx_path):
     return docx_path
 
 
-# --------------------------------------------------------------------------------------
 def build(root, outdir, cfg=None, log=None):
     cfg = cfg or {}
 
@@ -430,8 +375,6 @@ def build(root, outdir, cfg=None, log=None):
         else:
             print(msg % a if a else msg)
 
-    # reference_query_sets.csv and the external cache live under project.inputs_dir,
-    # which is outside the timestamped build directory.
     global EXTRA_SEARCH, EXCLUDE_DIRS
     _inp = (cfg.get("project", {}) or {}).get("inputs_dir", "")
     EXTRA_SEARCH = [d for d in (_inp, os.path.join(_inp, "references"),
@@ -449,7 +392,6 @@ def build(root, outdir, cfg=None, log=None):
     with open(os.path.join(outdir, "manuscript", "RESULTS_NUMBERS.json"), "w") as fh:
         json.dump(N, fh, indent=2, default=str)
 
-    # ---- main figures, renamed in citation order
     copied_fig = []
     for i, (primary, alt, cap) in enumerate(FIGURE_MAP, 1):
         src = _find(root, primary) or (_find(root, alt) if alt else None)
@@ -457,18 +399,21 @@ def build(root, outdir, cfg=None, log=None):
             dst = os.path.join(outdir, "figures", f"Figure{i}_{os.path.basename(src)}")
             _copy(src, dst)
             copied_fig.append((f"Figure {i}", os.path.basename(dst), cap))
-    # supplementary figures
     copied_sfig = []
-    for i, nm in enumerate(["RCA_PAV_heatmap.png", "CPN60_PAV_heatmap.png",
-                            "genomewide_prevalence_spectrum.png",
-                            "genomewide_per_cultivar.png"], 1):
-        src = _find(root, nm)
-        if src:
-            dst = os.path.join(outdir, "supplementary", "figures", f"FigureS{i}_{nm}")
+    for i, (key, names, _title) in enumerate(numbering.SUPP_FIGURES, 1):
+        for nm in names:
+            src = _find(root, nm)
+            if not src:
+                continue
+            ext = os.path.splitext(nm)[1]
+            suffix = "_page1" if nm.endswith("_p1.png") else ""
+            dst = os.path.join(outdir, "supplementary", "figures",
+                               f"FigureS{i}_{key}{suffix}{ext}")
             _copy(src, dst)
             copied_sfig.append((f"Supplementary Figure S{i}", os.path.basename(dst), nm))
+        if not any(_find(root, nm) for nm in names):
+            _log("[final] WARNING Supplementary Figure S%d (%s) not found", i, key)
 
-    # ---- main tables, generated from the audit outputs
     main_tables = []
     R, C = N.get("RCA", {}), N.get("CPN60", {})
     sp = {r["family"]: r for r in N.get("specificity", [])}
@@ -499,8 +444,7 @@ def build(root, outdir, cfg=None, log=None):
          f"{N.get('divergence', {}).get('RCA', {}).get('median_identity', 'n/a')}%",
          f"{N.get('divergence', {}).get('CPN60', {}).get('median_identity', 'n/a')}%"],
     ], columns=["Metric", "RCA", "Cpn60"])
-    main_tables.append(("Table 1", t1,
-                        "Summary of the pan-proteome with recruitment specificity."))
+    by_key = {"summary": t1}
 
     lc = _read(root, "locus_counts_by_cultivar.csv")
     if lc is not None:
@@ -515,8 +459,7 @@ def build(root, outdir, cfg=None, log=None):
         lc.columns = [c.replace("CPN60_", "Cpn60 ").replace("RCA_", "RCA ")
                        .replace("_", " ").replace("cultivar", "Cultivar")
                       for c in lc.columns]
-        main_tables.append(("Table 2", lc,
-                            "Protein models and gene loci per cultivar."))
+        by_key["locus_counts"] = lc
     phys = _read(root, "physicochemical_features.csv")
     if phys is not None:
         LBL = {"length": "Length (aa)", "mw": "Molecular weight (kDa)",
@@ -555,27 +498,58 @@ def build(root, outdir, cfg=None, log=None):
                              "Cpn60": f"{g.aliphatic_index.median():.1f} "
                                       f"({g.aliphatic_index.min():.1f} to "
                                       f"{g.aliphatic_index.max():.1f})"})
-        main_tables.append(("Table 3", pd.DataFrame(rows),
-                            "Sequence-derived physicochemical descriptors."))
+        by_key["physicochemical"] = pd.DataFrame(rows)
     gran = _read(root, "granularity_partition.csv")
     if gran is not None:
-        main_tables.append(("Table 4", gran,
-                            "Prevalence partition at three clustering granularities."))
+        by_key["granularity"] = gran
+    isum = _read(root, "rca_isoform_summary.csv")
+    if isum is not None:
+        show = isum.copy()
+        show["principal_full_length_proteoform"] = [
+            f"{p} ({n})" if isinstance(p, str) and p else ""
+            for p, n in zip(show["principal_full_length_proteoform"],
+                            show["principal_n_cultivars"])]
+        by_key["rca_isoforms"] = show[[
+            "established_isoform", "chinese_spring_locus", "proteoforms", "full_length",
+            "reference_absent", "principal_full_length_proteoform",
+            "cultivars_with_full_length_form", "promoter_heat_responsive_element"]]
+    else:
+        _log("[final] WARNING rca_isoform_summary.csv not found -> run rca_isoforms.py; "
+             "Table %d will be missing", numbering.main_table_number("rca_isoforms"))
     cand = _read(root, "candidate_table.csv")
     if cand is not None:
-        main_tables.append(("Table 5", cand,
-                            "Prioritised candidate proteotypes for experimental follow-up."))
+        cand = cand.copy()
+        label = {}
+        iso = _read(root, "rca_isoform_assignment.csv")
+        if iso is not None:
+            label.update(dict(zip(iso["proteotype_id"], iso["established_isoform"])))
+        dcl = _read(root, "domain_classification.csv")
+        if dcl is not None:
+            pretty = {"plastid_Cpn60beta": "plastid Cpn60\u03b2",
+                      "plastid_Cpn60alpha": "plastid Cpn60\u03b1",
+                      "mitochondrial_CPN60": "mitochondrial CPN60"}
+            for p, c in zip(dcl["proteotype_id"], dcl["hmm_class"]):
+                if str(p).startswith("CPN60_"):
+                    label.setdefault(p, pretty.get(c, c))
+        pos = list(cand.columns).index("candidate_class") + 1 \
+            if "candidate_class" in cand.columns else 1
+        cand.insert(pos, "established_isoform_or_class",
+                    cand["proteotype_id"].map(label).fillna(""))
+        by_key["candidates"] = cand
     csl = _read(root, "cs_locus_table.csv")
     if csl is not None:
-        main_tables.append(("Table 6", csl,
-                            "Reference gene loci underlying the proteotypes."))
+        by_key["cs_loci"] = csl
+    for i, (key, _src, title) in enumerate(numbering.MAIN_TABLES, 1):
+        if key in by_key:
+            main_tables.append((f"Table {i}", by_key[key], title + "."))
+        else:
+            _log("[final] WARNING Table %d (%s) could not be built", i, key)
 
     for name, df, cap in main_tables:
         df.to_csv(os.path.join(outdir, "tables",
                                name.replace(" ", "") + ".csv"), index=False)
     tables_to_docx(main_tables, os.path.join(outdir, "tables", "MainTables.docx"))
 
-    # ---- supplementary tables and data
     copied_st = []
     for i, (nm, desc) in enumerate(SUPP_TABLES, 1):
         src = _find(root, os.path.basename(nm)) or os.path.join(root, nm)
@@ -592,18 +566,15 @@ def build(root, outdir, cfg=None, log=None):
             _copy(src, dst)
             copied_sd.append((os.path.basename(dst), desc))
 
-    # ---- manuscript: the full paper, with this run's numbers substituted in
     figs = {}
     for lab, fname, _cap in copied_fig:
         try:
             figs[int(lab.split()[-1])] = os.path.join(outdir, "figures", fname)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
-    # No manuscript prose is generated: this build emits data artefacts only.
     _log("[final] tables, figures and RESULTS_NUMBERS.json written; prose not generated "
          "by design.")
 
-    # ---- manifest
     with open(os.path.join(outdir, "MANIFEST.md"), "w", encoding="utf-8") as fh:
         fh.write(f"# Publication bundle\n\nBuild: `{os.path.basename(root)}`  \n"
                  f"Generated: {N['generated']}\n\n")
@@ -631,12 +602,14 @@ def build(root, outdir, cfg=None, log=None):
                  "| Over-recruitment / bona fide fraction | Table 1; "
                  "`supplementary/tables/*specificity*`; audit/specificity_audit.csv |\n"
                  "| Protein models vs gene loci | Table 2; audit/locus_counts_by_cultivar.csv |\n"
-                 "| Chromosomes and genomic loci | Table 6; members.csv gene/chromosome columns |\n"
+                 "| Chromosomes and genomic loci | Table 3; members.csv gene/chromosome columns |\n"
                  "| How far is 'reference-absent'? | Table 1 last row; audit/novel_divergence.csv |\n"
                  "| Accessory fraction vs granularity | Table 4 |\n"
+                 "| Link to the nine established RCA isoforms | Table 5; Supplementary Table S7 |\n"
                  "| Core fraction confidence interval | audit/core_fraction_ci.csv |\n"
-                 "| Actionable candidates in main text | Table 5 |\n"
-                 "| Cpn60 heterogeneity | audit/cpn60_classes.csv; Table 3 |\n"
+                 "| Actionable candidates in main text | Table 7 |\n"
+                 "| Residue-level alignments | Supplementary Figures S3 and S4 |\n"
+                 "| Cpn60 heterogeneity | audit/cpn60_classes.csv; Table 6 |\n"
                  "| Tree support and rooting | Figures 3-4; *.supported.nwk |\n"
                  "| Domain confirmation of family identity | proteotype_annotation.csv |\n")
 

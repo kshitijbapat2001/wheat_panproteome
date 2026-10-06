@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""make_all_figures.py - regenerate every figure + data file of the wheat pan-proteome study.
-
-Reproduces all figures/tables from the pipeline's output files, split into MAIN
-outputs and a separate SUPPLEMENTARY directory. Covers BOTH the focus families
-(RCA, Cpn60) and the whole Chinese Spring reference proteome (genome_wide_pav.csv).
-
-It also builds the proteotype NOMENCLATURE/ANNOTATION table and (optionally) an
-annotated FASTA in which every proteotype is named by a composite of:
-  <proteotype-id (our nomenclature)>__<representative cultivar>__<UniProt accession>
-e.g.  RCA_PT006__mace__A0A142F4Z8
-
-  Figure1_overview / Figure2_novel_pav / Figure5_pangenome_overview    main
-  Figure3/4_*_tree_circular / Figure6/7_*_variability                  main
-  proteotype_naming.csv                                                main   (+ Table_S7 in supp)
-  PanProteome_catalog.annotated.faa (needs --sequences)                main
-  FigureS1-S4 (PAV heatmaps + circos) / S5-S6 (genome-wide)            supplementary
-  Table_S1..S7 (.csv)                                                  supplementary
-
-Naming needs proteotypes.csv + members.csv + diamond_hits_all.csv. Anything whose
-input is missing is skipped with a message.
-
-Usage:
-    python make_all_figures.py --inputs /path/to/pan_proteome_build_XXXX --outdir ./figures
-Options:
-    --suppdir DIR        supplementary dir (default <outdir>/supplementary)
-    --cpn60-rows N       Cpn60 novel proteotypes in Figure 2b (default 30)
-    --sequences FASTA    proteotype FASTA (ids = proteotype ids) -> annotated FASTA
-    --label {id,composite}   y-axis / tip labels on heatmaps + trees (default id)
-Dependencies: pandas, numpy, matplotlib (circular trees use a built-in Newick parser).
-"""
+"""make_all_figures.py - regenerate every figure + data file of the wheat pan-proteome study."""
 
 from __future__ import annotations
 import math
@@ -48,11 +19,6 @@ plt.rcParams.update({
     "axes.edgecolor": "#333333", "figure.dpi": 300, "savefig.dpi": 300,
 })
 
-# --- figure size guard ---------------------------------------------------------------
-# Figure size scales with content here (a 141-row heatmap is ~58 inches tall). At 600 dpi
-# that is 189 megapixels: slow to write, impossible to open, and Pillow refuses to read
-# it at all ("decompression bomb"). Clamp the effective dpi so no figure exceeds
-# MAX_FIG_PIXELS, never going below 300, which is the usual journal minimum.
 MAX_FIG_PIXELS = 60e6
 MIN_FIG_DPI = 300
 try:
@@ -69,7 +35,7 @@ try:
         return _orig_savefig(self, *args, **kw)
 
     _mfig.Figure.savefig = _clamped_savefig
-except Exception:  # noqa: BLE001
+except Exception:
     pass
 BLUE, RED, GREY, ABSENT, AMBER = "#3B6FB6", "#C24B4B", "#B8BEC7", "#EFF1F3", "#E4A340"
 FAMILIES = ("RCA", "CPN60")
@@ -103,7 +69,7 @@ def _audit(fig, ax, tag):
             a, b = boxes[i], boxes[j]
             dx = min(a.x1, b.x1) - max(a.x0, b.x0)
             dy = min(a.y1, b.y1) - max(a.y0, b.y0)
-            if dx > 1.5 and dy > 1.5:      # >1.5 px overlap in both axes
+            if dx > 1.5 and dy > 1.5:
                 bad += 1
     print(f"[overlap-audit] {tag}: {len(boxes)} labels, {bad} overlapping pairs")
 
@@ -117,13 +83,7 @@ def cultivar_columns(pav):
 
 
 def _legend_below(fig, axes, handles, ncol=2, fontsize=10, pad=0.014):
-    """Place a legend underneath everything that has already been drawn.
-
-    Tip labels on a circular tree, and rotated cultivar labels on a heatmap, spill well
-    outside the axes box, so a legend positioned with a guessed offset (or with
-    loc="lower right") lands on top of them. Here the drawn content is measured first and
-    the legend is anchored below its lowest point, which cannot collide by construction.
-    """
+    """Place a legend underneath everything that has already been drawn."""
     fig.canvas.draw()
     r = fig.canvas.get_renderer()
     axes = axes if isinstance(axes, (list, tuple)) else [axes]
@@ -152,10 +112,8 @@ def _panel_letter(ax, letter, dx=-52, dy=16):
                 va="bottom", ha="left")
 
 
-# ============================================================ Figure: overview
 def plot_overview(pt, pav, cults, out_png):
-    """Fig 1. (a) total vs novel proteotypes per family; (b) per-cultivar novel
-    proteotype counts for BOTH families. Inputs: proteotypes.csv, pav_matrix.csv."""
+    """Fig 1. (a) total vs novel proteotypes per family; (b) per-cultivar novel"""
     fig, (axA, axB) = plt.subplots(1, 2, figsize=(8.2, 3.4))
     total = [int((pt.family == f).sum()) for f in FAMILIES]
     novel = [int(pt.loc[pt.family == f, "novel_vs_reference"].sum()) for f in FAMILIES]
@@ -172,7 +130,6 @@ def plot_overview(pt, pav, cults, out_png):
     axA.spines[["top", "right"]].set_visible(False)
     _panel_letter(axA, "a")
 
-    # per-cultivar novel counts, grouped by family
     def novel_counts(fam):
         ids = set(pt.loc[(pt.family == fam) & (pt.novel_vs_reference), "proteotype_id"])
         sub = pav[(pav.family == fam) & (pav.proteotype_id.isin(ids))]
@@ -193,7 +150,6 @@ def plot_overview(pt, pav, cults, out_png):
     fig.savefig(out_png, bbox_inches="tight"); plt.close(fig)
 
 
-# ==================================================== Figure: novel PAV matrix
 def _novel_matrix(pt, pav, family, cults, max_rows=None):
     novel = pt[(pt.family == family) & (pt.novel_vs_reference)]
     sub = pav[pav.proteotype_id.isin(set(novel.proteotype_id))].copy()
@@ -219,20 +175,14 @@ def _draw_pav(ax, ids, M, cults, prefix, labels=None):
 
 
 def plot_novel_pav(pt, pav, cults, out_png, cpn60_rows=30, labels=None):
-    """Fig 2. Presence/absence of NOVEL proteotypes: (a) RCA (all), (b) Cpn60
-    (most prevalent). Inputs: pav_matrix.csv, proteotypes.csv."""
+    """Fig 2. Presence/absence of NOVEL proteotypes: (a) RCA (all), (b) Cpn60"""
     rca_ids, rca_M, n_rca = _novel_matrix(pt, pav, "RCA", cults)
     cpn_ids, cpn_M, n_cpn = _novel_matrix(pt, pav, "CPN60", cults, max_rows=cpn60_rows)
     h = max(4.5, 0.17 * max(len(rca_ids), len(cpn_ids)) + 1.6)
-    # Composite identifiers (id|UniProt|cultivar) are long; give the figure a wider
-    # canvas and a much larger gap between the two panels so that panel b's left-hand
-    # y-axis labels cannot spill over panel a's presence/absence matrix.
     composite = bool(labels)
     fig = plt.figure(figsize=((10.4 if composite else 7.6), h))
     gs = fig.add_gridspec(1, 2, wspace=(0.85 if composite else 0.45))
     axA, axB = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-    # The per-panel counts move into the axis labels rather than titles: panel b shows
-    # only the most prevalent rows, and the reader must be told that.
     _draw_pav(axA, rca_ids, rca_M, cults, "RCA_PT", labels=labels)
     axA.set_ylabel(f"{n_rca} novel RCA proteotypes", fontsize=9)
     _panel_letter(axA, "a")
@@ -247,7 +197,6 @@ def plot_novel_pav(pt, pav, cults, out_png, cpn60_rows=30, labels=None):
     fig.savefig(out_png, bbox_inches="tight"); plt.close(fig)
 
 
-# ========================================================= Figure: PAV heatmap
 def plot_pav_heatmap(pt, pav, cults, family, out_png, labels=None):
     """Full presence/absence heatmap for one family. Input: pav_matrix.csv."""
     sub = pav[pav.family == family].reset_index(drop=True)
@@ -261,7 +210,6 @@ def plot_pav_heatmap(pt, pav, cults, family, out_png, labels=None):
     ax.set_yticks(range(len(ids)))
     yl = [labels.get(i, i.replace(family + "_", "")) for i in ids] if labels else [i.replace(family + "_", "") for i in ids]
     ax.set_yticklabels(yl, fontsize=(4.8 if labels else 5.5))
-    # mark novel proteotype labels in red
     for tick, pid in zip(ax.get_yticklabels(), ids):
         if pid in novel:
             tick.set_color(RED)
@@ -276,24 +224,20 @@ def plot_pav_heatmap(pt, pav, cults, family, out_png, labels=None):
     fig.savefig(out_png, bbox_inches="tight"); plt.close(fig)
 
 
-# ======================================================= Figure: circos (PAV)
 def plot_circos_pav(pt, pav, cults, family, out_png):
-    """Higher-visibility radial (circos) presence/absence plot for one family.
-    Improvements: larger canvas, wider inner hub, a gap wedge that holds the
-    cultivar ring labels (so they never overlap the bars), and proteotype labels
-    rotated along their spokes. Input: pav_matrix.csv."""
+    """Higher-visibility radial (circos) presence/absence plot for one family."""
     sub = pav[pav.family == family].reset_index(drop=True)
     ids = sub["proteotype_id"].tolist()
     novel = set(pt.loc[(pt.family == family) & (pt.novel_vs_reference), "proteotype_id"])
     n = len(ids)
     if n == 0:
         return
-    gap = math.radians(26)                     # wedge kept free for ring labels
+    gap = math.radians(26)
     span = 2 * math.pi - gap
-    start = math.pi / 2 + gap / 2              # begin just after the top gap
+    start = math.pi / 2 + gap / 2
     theta = np.array([start + span * i / n for i in range(n)])
     width = span / n * 0.95
-    r0 = 6.0                                   # inner hub radius (bars start here)
+    r0 = 6.0
     ring_w = 0.92
 
     big = n > 60
@@ -309,8 +253,6 @@ def plot_circos_pav(pt, pav, cults, family, out_png):
         ax.bar(theta, [ring_w * 0.86] * n, width=width, bottom=r,
                color=colors, edgecolor="#d9d9d9", linewidth=0.3)
     r_out = r0 + len(cults) * ring_w
-    # proteotype labels, oriented RADIALLY (reading outward) so their tangential
-    # footprint is just the glyph height -> no overlap even with many spokes.
     lab_fs = 3.6 if big else 6.5
     for th, pid in zip(theta, ids):
         deg = math.degrees(th) % 360
@@ -319,8 +261,6 @@ def plot_circos_pav(pt, pav, cults, family, out_png):
             rot, ha = deg - 180, "right"
         ax.text(th, r_out + 0.4, pid.replace(family + "_", ""),
                 rotation=rot, rotation_mode="anchor", ha=ha, va="center", fontsize=lab_fs)
-    # cultivar ring labels: stacked vertically in the free wedge at the top (90 deg),
-    # where there are no bars, so they never collide with spokes or spoke labels.
     for i, cult in enumerate(cults):
         ax.text(math.pi / 2, r0 + i * ring_w + ring_w * 0.42, clab(cult),
                 ha="center", va="center", fontsize=8.5 if not big else 7.5,
@@ -338,10 +278,8 @@ def plot_circos_pav(pt, pav, cults, family, out_png):
     fig.savefig(out_png, bbox_inches="tight"); plt.close(fig)
 
 
-# ======================================================= Figure: entropy
 def plot_entropy(poly, family, out_png):
-    """Readable positional-variability plot for one family (larger fonts, taller
-    panel, mean line). Input: polymorphic_sites.csv."""
+    """Readable positional-variability plot for one family (larger fonts, taller"""
     sub = poly[poly.family == family]
     if sub.empty:
         return
@@ -361,10 +299,8 @@ def plot_entropy(poly, family, out_png):
     fig.savefig(out_png, bbox_inches="tight"); plt.close(fig)
 
 
-# ======================================================= Circular tree
 def parse_newick(text):
-    """Minimal Newick parser -> nested dict {name,length,support,children}.
-    Handles branch lengths, internal support labels, (multi)furcations."""
+    """Minimal Newick parser -> nested dict {name,length,support,children}."""
     text = text.strip()
     if text.endswith(";"):
         text = text[:-1]
@@ -405,8 +341,7 @@ def parse_newick(text):
 
 def render_circular_tree(newick_text, out_png, title, novel_ids=None, prefix="",
                          label_fontsize=None, labels=None):
-    """Circular (fan) phylogram rendered with matplotlib. Tips are coloured by
-    novelty when `novel_ids` is given. Input (in pipeline): the family .nwk file."""
+    """Circular (fan) phylogram rendered with matplotlib. Tips are coloured by"""
     novel_ids = novel_ids or set()
     root = parse_newick(newick_text)
 
@@ -449,7 +384,6 @@ def render_circular_tree(newick_text, out_png, title, novel_ids=None, prefix="",
 
     def draw(n, r_par):
         a = n["angle"]
-        # radial branch (parent radius -> this node radius, at this node's angle)
         ax.plot([r_par * math.cos(a), n["radius"] * math.cos(a)],
                 [r_par * math.sin(a), n["radius"] * math.sin(a)],
                 color=col, lw=0.6)
@@ -466,10 +400,8 @@ def render_circular_tree(newick_text, out_png, title, novel_ids=None, prefix="",
                 rot, ha = deg - 180, "right"
             name = labels.get(n["name"], (n["name"] or "").replace(prefix, "")) if labels else (n["name"] or "").replace(prefix, "")
             is_novel = (n["name"] in novel_ids)
-            # tip marker at the true branch tip
             ax.plot([n["radius"] * math.cos(a)], [n["radius"] * math.sin(a)],
                     marker="o", ms=2.2, color=(RED if is_novel else BLUE))
-            # faint leader from the tip out to the common label radius, then label
             r_lab = R * 1.06
             ax.plot([n["radius"] * math.cos(a), r_lab * math.cos(a)],
                     [n["radius"] * math.sin(a), r_lab * math.sin(a)],
@@ -481,9 +413,6 @@ def render_circular_tree(newick_text, out_png, title, novel_ids=None, prefix="",
     draw(root, 0.0)
     lim = R * 1.55
     ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
-    # No title (it collided with the tip labels at the top of the fan; titles belong in
-    # the caption). The legend is anchored BELOW the axes: inside the axes it sat on top
-    # of the bottom-right tip labels.
     if novel_ids:
         _legend_below(fig, ax,
                       [Patch(facecolor=BLUE, label="in Chinese Spring"),
@@ -493,16 +422,9 @@ def render_circular_tree(newick_text, out_png, title, novel_ids=None, prefix="",
     fig.savefig(out_png, bbox_inches="tight", dpi=300); plt.close(fig)
     return out_png
 
-# ================= genome-wide (whole Chinese Spring reference) =================
-# These operate on a genome-wide presence/absence table `genome_wide_pav.csv`
-# (columns: cluster_id, <cultivar columns...>, novel_vs_reference) that the
-# pipeline builds by clustering EVERY protein of all cultivars against the entire
-# Chinese Spring proteome. They summarise the whole-proteome pan-genome; the two
-# focus families (RCA, Cpn60) are a detailed subset of this.
 
 def pangenome_partition(pav, cults):
-    """Classify each cluster as core / soft-core / shell / cloud. Returns
-    (counts dict, prevalence array)."""
+    """Classify each cluster as core / soft-core / shell / cloud. Returns"""
     M = pav[cults].to_numpy(bool)
     prev = M.sum(1)
     N = len(cults)
@@ -536,8 +458,7 @@ def rarefaction(pav, cults, nperm=50, seed=0):
 
 def plot_pangenome_overview(pav, cults, out_png,
                             title="Whole-proteome pan-genome (Chinese Spring reference)"):
-    """MAIN genome-wide figure: (a) core/soft-core/shell/cloud partition;
-    (b) pan- and core-proteome rarefaction curves. Input: genome_wide_pav.csv."""
+    """MAIN genome-wide figure: (a) core/soft-core/shell/cloud partition;"""
     part, prev = pangenome_partition(pav, cults)
     pan, core = rarefaction(pav, cults)
     N = len(cults)
@@ -580,8 +501,7 @@ def plot_prevalence_hist(pav, cults, out_png):
 
 
 def plot_genomewide_per_cultivar(pav, cults, out_png):
-    """SUPP genome-wide figure: per-cultivar core vs accessory composition.
-    Input: genome_wide_pav.csv."""
+    """SUPP genome-wide figure: per-cultivar core vs accessory composition."""
     M = pav[cults].to_numpy(bool); prev = M.sum(1); N = len(cults)
     core_mask = prev == N
     core_counts = [int((M[:, j] & core_mask).sum()) for j in range(N)]
@@ -598,10 +518,8 @@ def plot_genomewide_per_cultivar(pav, cults, out_png):
     fig.tight_layout(); fig.savefig(out_png, bbox_inches="tight"); plt.close(fig)
 
 
-# ================= proteotype naming / annotation (UniProt + cultivar + id) =====
 def parse_uniprot_id(qseqid):
-    """UniProt accession + entry name from a DIAMOND qseqid such as
-    'tr|A0A0A0YVQ2|A0A0A0YVQ2_WHEAT' -> ('A0A0A0YVQ2', 'A0A0A0YVQ2_WHEAT')."""
+    """UniProt accession + entry name from a DIAMOND qseqid such as"""
     parts = str(qseqid).split("|")
     if len(parts) >= 3:
         return parts[1], parts[2]
@@ -609,10 +527,7 @@ def parse_uniprot_id(qseqid):
 
 
 def build_proteotype_naming(inputs_dir, out_csv=None):
-    """Nomenclature/annotation table linking every proteotype to its closest
-    UniProt entry (best DIAMOND hit), its representative cultivar and source
-    protein id, and a composite_id = <proteotype>__<cultivar>__<uniprot>.
-    Requires proteotypes.csv, members.csv, diamond_hits_all.csv in inputs_dir."""
+    """Nomenclature/annotation table linking every proteotype to its closest"""
     import os
     pt = pd.read_csv(os.path.join(inputs_dir, "proteotypes.csv"))
     mem = pd.read_csv(os.path.join(inputs_dir, "members.csv"))
@@ -646,8 +561,6 @@ def build_proteotype_naming(inputs_dir, out_csv=None):
                           "representative_source_id": rep.source_id,
                           "uniprot_id": uacc, "uniprot_entry": uentry})
     _agg_cols = ["cultivar", "source_id", "uacc", "uentry", "hit_evalue", "evalue_to_ref"]
-    # NB: select the non-grouping columns explicitly -> no pandas FutureWarning about
-    # DataFrameGroupBy.apply operating on the grouping columns (works on pandas 1.x-2.x).
     rep = md.groupby("proteotype_id")[_agg_cols].apply(agg).reset_index()
     nm = pt.merge(rep, on="proteotype_id", how="left")
 
@@ -676,8 +589,7 @@ def composite_label_map(naming_df, style="compact"):
 
 
 def write_annotated_fasta(sequences_fa, naming_df, out_fa):
-    """Re-header a proteotype FASTA (record ids = proteotype_id) with composite
-    ids + full annotation. Light-weight FASTA parse (no Biopython needed)."""
+    """Re-header a proteotype FASTA (record ids = proteotype_id) with composite"""
     info = {r.proteotype_id: r for r in naming_df.itertuples()}
 
     def header(pid):
@@ -714,7 +626,6 @@ def write_annotated_fasta(sequences_fa, naming_df, out_fa):
     return out_fa, n
 
 
-# ================================================================= CLI / driver
 import argparse
 import os
 import shutil
@@ -723,8 +634,7 @@ FAMILY_PREFIX = {"RCA": "RCA_", "CPN60": "CPN60_"}
 
 
 def _find_input(inputs_dir, filename):
-    """Locate a pipeline output. Bulky tables live in <result>/supplementary/, the rest
-    at the top level, so look in both."""
+    """Locate a pipeline output. Bulky tables live in <result>/supplementary/, the rest"""
     for cand in (os.path.join(inputs_dir, filename),
                  os.path.join(inputs_dir, "supplementary", filename)):
         if os.path.exists(cand):
@@ -777,7 +687,6 @@ def main():
     cults = cultivar_columns(pav)
     made_supp = []
 
-    # ------------------------------ proteotype naming (UniProt + cultivar + id)
     labels = None
     naming_src = a.inputs
     if not all(os.path.exists(os.path.join(naming_src, f))
@@ -790,8 +699,8 @@ def main():
                       for f in ("proteotypes.csv", "members.csv", "diamond_hits_all.csv"))
     if have_naming:
         nm = build_proteotype_naming(naming_src, os.path.join(outdir, "proteotype_naming.csv"))
-        nm.to_csv(os.path.join(suppdir, "Table_S7_proteotype_naming.csv"), index=False)
-        made_supp.append("Table_S7_proteotype_naming.csv")
+        nm.to_csv(os.path.join(suppdir, "supp_proteotype_naming.csv"), index=False)
+        made_supp.append("supp_proteotype_naming.csv")
         if a.label == "composite":
             labels = composite_label_map(nm)
         if a.sequences and os.path.exists(a.sequences):
@@ -805,7 +714,6 @@ def main():
         print("[naming] members.csv / diamond_hits_all.csv not found -> naming table + "
               "annotated FASTA skipped; figures use short ids.")
 
-    # ------------------------------------------------------------------ MAIN
     plot_overview(pt, pav, cults, os.path.join(outdir, "Figure1_overview.png"))
     plot_novel_pav(pt, pav, cults, os.path.join(outdir, "Figure2_novel_pav.png"),
                    cpn60_rows=a.cpn60_rows, labels=labels)
@@ -814,10 +722,6 @@ def main():
         nwk = _read_nwk(os.path.join(a.inputs, f"{fam}.nwk"))
         if nwk:
             novel = set(pt.loc[(pt.family == fam) & pt.novel_vs_reference, "proteotype_id"])
-            # Prefer tree_tools: it DISPLAYS the SH-like support values FastTree already
-            # wrote into the Newick, collapses weakly supported nodes into polytomies and
-            # roots the tree. The local renderer below parses support and discards it,
-            # which is why the earlier figures could not support a clade-level claim.
             done = False
             try:
                 import tree_tools
@@ -837,7 +741,7 @@ def main():
                     title_note=(f"Node labels: SH-like local support; nodes < {thr:g} "
                                 f"collapsed ({n_col}); midpoint-rooted"))
                 done = True
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[tree] tree_tools unavailable/failed for {fam} ({e}); "
                       f"using the plain renderer.")
             if not done:
@@ -849,7 +753,6 @@ def main():
     plot_entropy(poly, "RCA", os.path.join(outdir, "Figure6_RCA_variability.png"))
     plot_entropy(poly, "CPN60", os.path.join(outdir, "Figure7_CPN60_variability.png"))
 
-    # genome-wide (whole Chinese Spring reference)
     gw_path = _find_input(a.inputs, "genome_wide_pav.csv")
     if gw_path:
         gw = pd.read_csv(gw_path)
@@ -860,31 +763,27 @@ def main():
         made_supp += ["FigureS5_prevalence_spectrum.png", "FigureS6_per_cultivar_composition.png"]
         _, prev = pangenome_partition(gw, gwc)
         pd.DataFrame({"category": list(part), "n_clusters": list(part.values())}).to_csv(
-            os.path.join(suppdir, "Table_S6_pangenome_partition.csv"), index=False)
+            os.path.join(suppdir, "supp_pangenome_partition.csv"), index=False)
         gw.assign(n_cultivars=prev).to_csv(
-            os.path.join(suppdir, "Table_S5_genome_wide_pav.csv"), index=False)
-        made_supp += ["Table_S5_genome_wide_pav.csv", "Table_S6_pangenome_partition.csv"]
+            os.path.join(suppdir, "supp_genome_wide_pav.csv"), index=False)
+        made_supp += ["supp_genome_wide_pav.csv", "supp_pangenome_partition.csv"]
     else:
         print("[genome-wide] genome_wide_pav.csv not found -> Figure 5 and S5/S6 skipped.")
         print("              (the pipeline writes it to <result>/supplementary/ when")
         print("               whole_proteome.enabled: true in config.yaml)")
 
-    # ---------------------------------------------------------- SUPPLEMENTARY
     hm = {"RCA": "FigureS1_RCA_PAV_heatmap.png", "CPN60": "FigureS2_CPN60_PAV_heatmap.png"}
-    ci = {"RCA": "FigureS3_RCA_circos.png", "CPN60": "FigureS4_CPN60_circos.png"}
+    ci = {"RCA": "circos_RCA_PAV.png", "CPN60": "circos_CPN60_PAV.png"}
     for fam in FAMILIES:
         plot_pav_heatmap(pt, pav, cults, fam, os.path.join(suppdir, hm[fam]), labels=labels); made_supp.append(hm[fam])
-        # Radial ("circos") PAV plots are off by default: they carry no genomic
-        # coordinates, so they cannot answer "where is this proteotype in the genome?".
-        # audit/cs_locus_table.csv (panproteome_audit.py) replaces them.
         if os.environ.get("PANPROTEOME_DRAW_CIRCOS"):
             plot_circos_pav(pt, pav, cults, fam, os.path.join(suppdir, ci[fam]))
             made_supp.append(ci[fam])
 
-    for src_name, dst in [("proteotypes.csv", "Table_S1_proteotypes.csv"),
-                          ("pav_matrix.csv", "Table_S2_pav_matrix.csv"),
-                          ("physicochemical_features.csv", "Table_S3_physicochemical_features.csv"),
-                          ("polymorphic_sites.csv", "Table_S4_polymorphic_sites.csv")]:
+    for src_name, dst in [("proteotypes.csv", "supp_proteotypes.csv"),
+                          ("pav_matrix.csv", "supp_pav_matrix.csv"),
+                          ("physicochemical_features.csv", "supp_physicochemical_features.csv"),
+                          ("polymorphic_sites.csv", "supp_polymorphic_sites.csv")]:
         src = _find_input(a.inputs, src_name)
         dst_path = os.path.join(suppdir, dst)
         if src and os.path.abspath(src) != os.path.abspath(dst_path):

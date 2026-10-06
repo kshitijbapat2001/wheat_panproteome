@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Orchestrator. Every step reports what it is doing and why it stopped.
-#
-#   bash run_all.sh setup     # LOGIN NODE, once: miniforge + env + data + caches
-#   bash run_all.sh submit    # sbatch the job (does everything else)
-#   bash run_all.sh status    # queue + tail of the log
-#   bash run_all.sh finish [dir]  # run post-processing on an existing build
-#   bash run_all.sh verify    # re-run the gate on the newest build
-#   bash run_all.sh collect   # bundle the outputs for review
 set -uo pipefail            # NOT -e: a failing step must report, not vanish
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,13 +11,11 @@ die () { echo; echo "ERROR: $*" >&2; exit 1; }
 act () {
   if [[ ! -f "$CONDA" ]]; then
     if command -v conda >/dev/null 2>&1; then
-      # shellcheck disable=SC1090
       source "$(conda info --base)/etc/profile.d/conda.sh"
     else
       die "conda not found at $CONDA and not on PATH. Run:  bash run_all.sh setup"
     fi
   else
-    # shellcheck disable=SC1090
     source "$CONDA"
   fi
   [[ -x "$ENVD/bin/python" ]] || die "environment missing at $ENVD. Run:  bash run_all.sh setup"

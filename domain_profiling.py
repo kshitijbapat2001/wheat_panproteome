@@ -1,39 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-domain_profiling.py - resolve family and subunit identity by HMM profiling and
-reciprocal best hits, replacing identity-threshold classification.
-
-Why
----
-Classifying Cpn60 proteotypes by percentage identity to a couple of reference
-sequences is a stopgap, and the manuscript says so. Identity is a poor proxy for
-orthology: it depends on alignment length, on which references happen to be in the
-query set, and it cannot distinguish "70% identical because it is a diverged
-ortholog" from "70% identical because it is a different subunit". This module does
-what the limitation says is required:
-
-  1. DOMAIN CONFIRMATION. Pfam profiles are fetched from InterPro and searched
-     against every proteotype with hmmscan. PF00118 (Cpn60_TCP1) confirms group I
-     chaperonin identity; PF00004 (AAA) plus PF21228 (RuBisCO activase AAA helical)
-     confirm RCA and, critically, distinguish RCA from generic AAA+ ATPases.
-  2. CLASS PROFILES. Reviewed (Swiss-Prot) sequences are retrieved per class
-     - plastid Cpn60 alpha, plastid Cpn60 beta, mitochondrial CPN60, Rubisco
-     activase, and CbbX as an out-of-family negative control - aligned with MAFFT
-     and built into HMMs with hmmbuild. Each proteotype is scored against every
-     class profile and assigned to the best-scoring one, with the bit-score margin
-     over the runner-up reported so that ambiguous calls are visible.
-  3. RECIPROCAL BEST HITS against the same curated set, with DIAMOND. An RBH is
-     stronger evidence of orthology than a one-way best hit.
-
-A call is reported as high confidence only when the profile assignment and the RBH
-agree and the bit-score margin exceeds a threshold. Everything else is flagged.
-
-Requires: hmmer (hmmscan, hmmbuild, hmmpress), mafft, diamond - all already in
-environment.yml.
-
-    python domain_profiling.py --inputs outputs/latest --outdir outputs/latest/domains
-"""
+"""domain_profiling.py - resolve family and subunit identity by HMM profiling and"""
 from __future__ import annotations
 
 import argparse
@@ -51,16 +18,12 @@ UA = {"User-Agent": "wheat-panproteome/3.1"}
 INTERPRO_HMM = "https://www.ebi.ac.uk/interpro/wwwapi/entry/pfam/{acc}/?annotation=hmm"
 UNIPROT_STREAM = "https://rest.uniprot.org/uniprotkb/stream"
 
-# Pfam domains that decide family membership.
 PFAM = {
     "PF00118": "Cpn60_TCP1 (group I/II chaperonin)",
     "PF00004": "AAA (AAA+ ATPase core)",
     "PF21228": "RuBisCO_activase_AAA_helical (RCA-diagnostic)",
 }
 
-# Curated seed sets. Restricted to reviewed entries so the profiles are built from
-# characterised proteins, and to Viridiplantae except for CbbX, which does not occur
-# in green plants and is included precisely as a negative control.
 SEEDS = {
     "plastid_Cpn60alpha": '(taxonomy_id:33090) AND (reviewed:true) AND '
                           '(protein_name:"chaperonin 60 subunit alpha" OR '
@@ -68,9 +31,6 @@ SEEDS = {
     "plastid_Cpn60beta": '(taxonomy_id:33090) AND (reviewed:true) AND '
                          '(protein_name:"chaperonin 60 subunit beta" OR '
                          'protein_name:"RuBisCO large subunit-binding protein subunit beta")',
-    # Only two plant entries are reviewed under this name, which is below the minimum
-    # for a usable profile, so the query is widened to eukaryotes. Mitochondrial CPN60
-    # is highly conserved, so a broader seed set sharpens rather than blurs the profile.
     "mitochondrial_CPN60": '(reviewed:true) AND ('
                            'protein_name:"chaperonin CPN60, mitochondrial" OR '
                            'protein_name:"60 kDa chaperonin, mitochondrial" OR '
@@ -81,8 +41,8 @@ SEEDS = {
     "cbbX_negative_control": '(reviewed:true) AND (gene:cbbX)',
 }
 
-MIN_SEEDS = 3          # below this a class profile is not built
-DEFAULT_MARGIN = 20.0  # bits over the runner-up for a confident call
+MIN_SEEDS = 3
+DEFAULT_MARGIN = 20.0
 
 
 def sh(cmd, log=print, check=True):
@@ -116,7 +76,7 @@ def get_pfam_hmms(cache, log=print):
             raw = os.path.join(cache, f"{acc}.hmm.gz")
             try:
                 fetch(INTERPRO_HMM.format(acc=acc), raw, log)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log(f"    WARNING could not fetch {acc}: {e}")
                 continue
             out = raw[:-3]
@@ -124,7 +84,7 @@ def get_pfam_hmms(cache, log=print):
                 with gzip.open(raw, "rb") as gi, open(out, "wb") as go:
                     shutil.copyfileobj(gi, go)
             except OSError:
-                shutil.copyfile(raw, out)      # already uncompressed
+                shutil.copyfile(raw, out)
             parts.append(out)
         if not parts:
             return None
@@ -149,7 +109,7 @@ def get_seed_sets(cache, log=print):
                + urllib.parse.quote(query))
         try:
             fetch(url, fa, log)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log(f"    WARNING seed fetch failed for {cls}: {e}")
             continue
         n = sum(1 for l in open(fa) if l.startswith(">"))
@@ -221,7 +181,6 @@ def run(inputs, outdir, cache=None, margin=DEFAULT_MARGIN, threads=8, log=print)
         if not shutil.which(tool):
             raise SystemExit(f"{tool} not on PATH - activate the conda environment")
 
-    # ---- 1. Pfam domain confirmation ------------------------------------------------
     log("[domains] fetching Pfam profiles")
     pfam = get_pfam_hmms(cache, log)
     dom = pd.DataFrame()
@@ -238,7 +197,6 @@ def run(inputs, outdir, cache=None, margin=DEFAULT_MARGIN, threads=8, log=print)
             wide.to_csv(os.path.join(outdir, "pfam_domain_matrix.csv"), index=False)
             log(f"[domains] Pfam hits for {best['query'].nunique()} proteotypes")
 
-    # ---- 2. class profiles ----------------------------------------------------------
     log("[domains] retrieving curated seed sets")
     seeds = get_seed_sets(cache, log)
     cls_hmm = build_class_hmms(seeds, cache, log) if seeds else None
@@ -268,7 +226,6 @@ def run(inputs, outdir, cache=None, margin=DEFAULT_MARGIN, threads=8, log=print)
                 })
             calls = pd.DataFrame(rows)
 
-    # ---- 3. reciprocal best hits ----------------------------------------------------
     rbh = pd.DataFrame()
     if seeds:
         allseed = os.path.join(cache, "curated_all.faa")
@@ -300,7 +257,6 @@ def run(inputs, outdir, cache=None, margin=DEFAULT_MARGIN, threads=8, log=print)
                          "reciprocal": rev.get(seed) == pt})
         rbh = pd.DataFrame(rows)
 
-    # ---- 4. consensus ---------------------------------------------------------------
     out = calls if len(calls) else pd.DataFrame(columns=["proteotype_id"])
     if len(rbh):
         out = out.merge(rbh, on="proteotype_id", how="outer")
@@ -311,15 +267,7 @@ def run(inputs, outdir, cache=None, margin=DEFAULT_MARGIN, threads=8, log=print)
             out[f"has_{acc}"] = out["proteotype_id"].isin(hit)
 
     def verdict(r):
-        """Confidence in the CLASS call.
-
-        Strict reciprocity is the wrong criterion here. Reciprocal best hits test 1:1
-        orthology between two genomes; we are assigning many paralogous proteotypes to
-        a handful of curated classes, so at most one proteotype per seed can ever be
-        reciprocal. What matters is whether the profile assignment and the best-hit
-        CLASS agree, and whether the profile call is clearly separated from the
-        runner-up. Reciprocity is retained as a separate column, not as a gate.
-        """
+        """Confidence in the CLASS call."""
         h, rb = r.get("hmm_class"), r.get("rbh_class")
         if pd.isna(h) or not isinstance(h, str):
             return "unassigned"

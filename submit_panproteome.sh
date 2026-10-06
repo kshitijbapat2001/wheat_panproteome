@@ -1,16 +1,4 @@
 #!/bin/bash
-# =====================================================================================
-# submit_panproteome.sh  --  SLURM launcher, Pawsey Setonix
-#
-#   cd /scratch/pawsey1276/kbapat/Pan_prot_final
-#   bash setup_env.sh          # ONCE, on a login node (internet + conda env + data)
-#   sbatch submit_panproteome.sh
-#
-# Setonix compute nodes have no outbound internet, so setup_env.sh must run first on a
-# login node: it builds the conda environment and pre-downloads every proteome, every
-# UniProt reference and every external annotation into inputs/. This job then runs
-# entirely offline.
-# =====================================================================================
 #SBATCH --job-name=wheat_panproteome
 #SBATCH --account=pawsey1276
 #SBATCH --partition=work
@@ -22,14 +10,6 @@
 #SBATCH --output=logs/slurm_panproteome_%j.out
 #SBATCH --error=logs/slurm_panproteome_%j.err
 #SBATCH --export=NONE
-# Resource notes for Setonix `work`: a node is 128 cores / ~230 GB, allocated
-# proportionally. 64 cores -> ~115 GB, which is the half-node request above. The
-# whole-proteome stage is the expensive one; DIAMOND memory is roughly
-# 6 x whole_proteome.block_size_gb, and whole_proteome.memory_limit_gb must stay well
-# below --mem. A DIAMOND step dying with rc=-9 was killed by the OOM killer: lower
-# block_size_gb in config.yaml, or request a full node (--exclusive --cpus-per-task=128).
-# The stage caches its per-cultivar searches (whole_proteome.resume: true), so a job that
-# hits the wall clock can simply be re-submitted and will resume.
 
 set -euo pipefail
 
@@ -49,17 +29,16 @@ echo "=================================================================="
 for f in hpc_pipeline.py config.yaml environment.yml tree_tools.py \
          panproteome_audit.py external_data.py build_tables.py \
          make_all_figures.py domain_profiling.py transcript_crossref.py \
-         presubmission_checks.py verify_outputs.py; do
+         presubmission_checks.py verify_outputs.py format_supp_tables.py \
+         rca_isoforms.py alignment_views.py make_nature_figures.py; do
   [[ -f "$f" ]] || { echo "CRITICAL: $f not found in $PROJECT_DIR"; exit 1; }
 done
 
-# Caches must have been warmed on a login node: compute nodes have no internet.
 for d in inputs/hmm_cache inputs/zenodo_cache; do
   [[ -d "$PROJECT_DIR/$d" ]] || echo "WARNING: $d absent - run 'python prefetch_caches.py' \
 on a login node or the domain/transcript steps will fail."
 done
 
-# --- environment ------------------------------------------------------------------
 ENV_PREFIX="${CONDA_ENV_PREFIX:-$PROJECT_DIR/envs/wheat_panproteome}"
 CONDA_ROOT="${CONDA_ROOT:-$PROJECT_DIR/miniforge3}"
 
@@ -69,7 +48,6 @@ if [[ ! -x "$ENV_PREFIX/bin/python" ]]; then
   exit 1
 fi
 
-# Caches off HOME (small quota on Setonix); everything under the project dir.
 CONDA_CACHE_ROOT="${CONDA_CACHE_ROOT:-$PROJECT_DIR/.conda_cache}"
 export CONDA_PKGS_DIRS="$CONDA_CACHE_ROOT/pkgs"
 export PIP_CACHE_DIR="$CONDA_CACHE_ROOT/pip"
@@ -77,11 +55,9 @@ export XDG_CACHE_HOME="$CONDA_CACHE_ROOT/xdg"
 mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$XDG_CACHE_HOME"
 
 if [[ -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]]; then
-  # shellcheck disable=SC1091
   source "$CONDA_ROOT/etc/profile.d/conda.sh"
   conda activate "$ENV_PREFIX"
 else
-  # Fall back to using the env's bin directly (works without `conda activate`).
   export PATH="$ENV_PREFIX/bin:$PATH"
 fi
 echo "[env] python : $(python -V 2>&1)  ($(command -v python))"
@@ -89,7 +65,6 @@ echo "[env] diamond: $(command -v diamond || echo MISSING)"
 echo "[env] mafft  : $(command -v mafft   || echo MISSING)"
 echo "[env] fasttree: $(command -v FastTree || command -v fasttree || echo MISSING)"
 
-# Node-local scratch for tool temp files; all outputs stay in the project dir.
 export TMPDIR="${TMPDIR:-/tmp}/wheat_pp_${SLURM_JOB_ID:-$$}"
 mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -99,7 +74,6 @@ export MPLCONFIGDIR="$TMPDIR/mpl"
 THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export OMP_NUM_THREADS="$THREADS"
 
-# --- pre-flight --------------------------------------------------------------------
 python - <<'PY'
 import os, yaml
 c = yaml.safe_load(open("config.yaml")) or {}
@@ -117,14 +91,9 @@ for lbl, d in (("inputs", i), ("outputs", o)):
 PY
 python hpc_pipeline.py --check-env --config config.yaml || true
 
-# --- run ---------------------------------------------------------------------------
 echo "[run] starting pipeline with $THREADS threads ..."
 python hpc_pipeline.py --config config.yaml --threads "$THREADS"
 
-# Resolve the results directory from config.yaml rather than assuming ./outputs. A
-# hard-coded absolute outputs_dir once sent a run launched from FINAL/ into the parent
-# project's outputs/, and the job then declared "no result directory produced" on a run
-# that had in fact succeeded.
 OUTDIR="$(python - <<'PY'
 import os, yaml
 c = yaml.safe_load(open("config.yaml")) or {}
@@ -141,7 +110,6 @@ if [[ -z "${LATEST:-}" ]]; then
 fi
 echo "[run] result: $LATEST"
 
-# --- post-processing, all offline from the caches warmed by setup_env.sh ------------
 ln -sfn "$LATEST" "$PROJECT_DIR/outputs/latest"
 
 echo "[post] 1/6 audit ..."
@@ -160,21 +128,35 @@ python transcript_crossref.py --inputs "$LATEST" --outdir "$LATEST/transcripts" 
 echo "[post] 4/6 audit again (now that domain classes exist) ..."
 python panproteome_audit.py --inputs "$LATEST" --outdir "$LATEST/audit" || true
 
+echo "[post] 4b RCA isoform assignment (rca_isoforms.py) ..."
+python rca_isoforms.py --inputs "$LATEST" --outdir "$LATEST/audit" --config config.yaml \
+  || echo "[post] WARNING rca_isoforms.py failed - Table 5, Supplementary Table S7 and Figure S3 need it"
+echo "[post] 4c residue-level alignment views (alignment_views.py) ..."
+python alignment_views.py --inputs "$LATEST" --outdir "$LATEST/figures" \
+  || echo "[post] WARNING alignment_views.py failed - Supplementary Figures S3/S4 need it"
+
 echo "[post] 5/6 figures (composite labels, 600 dpi) ..."
 python make_all_figures.py --inputs "$LATEST" --outdir "$LATEST/final/figures" \
     --suppdir "$LATEST/final/supplementary" --label composite --cpn60-rows 30 \
     --sequences "$LATEST/PanProteome_catalog.faa" \
   || python make_all_figures.py --inputs "$LATEST" --outdir "$LATEST/final/figures" \
         --suppdir "$LATEST/final/supplementary" --label composite --cpn60-rows 30 || true
+echo "[post] 5b Nature-format figures and source data (make_nature_figures.py) ..."
+python make_nature_figures.py --inputs "$LATEST" --outdir "$LATEST/final/nature_figures" \
+    --source-data "$LATEST/final/source_data" \
+  || echo "[post] WARNING make_nature_figures.py failed"
 
 echo "[post] 6/6 tables + RESULTS_NUMBERS.json ..."
 python build_tables.py --inputs "$LATEST" --outdir "$LATEST/final" \
                        --config config.yaml || true
 
+echo "[post] publication-formatted supplementary tables ..."
+python format_supp_tables.py "$LATEST/final/supplementary/tables" \
+                             "$LATEST/final/supplementary/tables_formatted" || true
+
 echo "[post] presubmission checks ..."
 python presubmission_checks.py --inputs "$LATEST" --outdir "$LATEST/checks" || true
 
-# --- gate ---------------------------------------------------------------------------
 echo "=================================================================="
 echo " VERIFICATION"
 echo "=================================================================="
@@ -186,7 +168,7 @@ echo " Completed: $(date)"
 echo " Result dir         : $LATEST"
 echo " Stable symlink     : $PROJECT_DIR/outputs/latest"
 echo " FINAL BUNDLE       : $LATEST/final/"
-echo "   manuscript draft : $LATEST/final/manuscript/Manuscript_draft.docx"
+echo "   numbers (JSON)   : $LATEST/final/manuscript/RESULTS_NUMBERS.json"
 echo "   main figures     : $LATEST/final/figures/"
 echo "   main tables      : $LATEST/final/tables/"
 echo "   supplementary    : $LATEST/final/supplementary/"
