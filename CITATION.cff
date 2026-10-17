@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "wheat_panproteome"
+version: "1.0.0"
+date-released: "2026-10-18"
+license: MIT
+repository-code: "https://github.com/kshitijbapat2001/wheat_panproteome"
+authors:
+  - family-names: Bapat
+    given-names: Kshitij Balendu
+    orcid: "https://orcid.org/0009-0003-8694-5303"
+    affiliation: "The University of Western Australia"
+  - family-names: Pratap
+    given-names: Agyeya
+    orcid: "https://orcid.org/0000-0003-2633-022X"
+    affiliation: "The University of Western Australia"
+  - family-names: Taylor
+    given-names: Nicolas L.
+    orcid: "https://orcid.org/0000-0003-2004-5217"
+    affiliation: "The University of Western Australia"
+keywords:
+  - pan-proteome
+  - proteomics
+  - bioinformatics pipeline
+  - Triticum aestivum
+  - Rubisco activase
+  - chaperonin-60
