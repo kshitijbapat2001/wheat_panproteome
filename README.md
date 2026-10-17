@@ -18,23 +18,10 @@ The release contains (i) the complete analysis pipeline and (ii) every derived d
 | `data/reference/` | The 64 curated UniProtKB reference queries (28 RCA, 36 Cpn60) |
 | `data/tables/` | Plain CSV versions of Supplementary Tables 1–7 and of every tabular Supplementary Data item |
 | `data/supplementary_data/` | Supplementary Data 1–18 exactly as submitted (Excel workbooks with a `Legend` sheet describing every column; PDFs; ZIP) |
-| `data/figures/` | Fig. 1–4 and Extended Data Figs 1–3 (vector PDF with embedded fonts and 600-dpi PNG) |
+| `data/figures/` | Fig. 1–4 and Extended Data Figs 1-3 (vector PDF with embedded fonts and 600-dpi PNG) |
 | `data/source_data/` | Source Data for every figure (Excel, one workbook per figure) |
 | `MANIFEST.tsv` | Every file with size and MD5 checksum |
 
-## Correspondence with the manuscript
-
-| Manuscript item | File(s) |
-|---|---|
-| Fig. 1 | `data/figures/main/Fig1.*`; source `data/source_data/Source_Data_Fig1.xlsx` |
-| Fig. 2 (RCA and Cpn60 phylogenies) | `data/figures/main/Fig2.*`; trees in `data/alignments_and_trees/*.supported.nwk` |
-| Fig. 3 (per-column entropy) | `data/figures/main/Fig3.*`; Supplementary Data 11 |
-| Fig. 4 (genome-wide pan-proteome) | `data/figures/main/Fig4.*`; Supplementary Data 16 |
-| Extended Data Figs 1–3 | `data/figures/extended_data/` |
-| Supplementary Tables 1–7 | `data/tables/Supplementary_Table_*.csv` |
-| Supplementary Data 1–18 | `data/supplementary_data/`, CSV copies in `data/tables/` |
-
-Former numbering (manuscript v2.3): Figs 3 and 4 → Fig. 2a,b; Figs 5 and 6 → Fig. 3a,b; Fig. 7 → Fig. 4; Fig. 2 → Extended Data Fig. 1; Figs S1 and S2 → Extended Data Fig. 2; Figs S5 and S6 → Extended Data Fig. 3; Figs S3 and S4 → Supplementary Data 9 and 12; Tables 1–7 → Supplementary Tables 1–7; Tables S1–S16 → Supplementary Data (S1→1, S2→2, S10→3, S6→4, S3→5, S4→6, S5→7, S7→8, S8→10, S9→11, S12→13, S13→14, S11→15, S14→16, S16→18; S15 is reported in the Fig. 4 legend and Source Data); Supplementary Data 17 (alignments and trees) is new.
 
 ## Running the pipeline
 
